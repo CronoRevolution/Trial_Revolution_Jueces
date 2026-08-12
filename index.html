@@ -221,7 +221,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.08.12.2
+      versión 2026.08.12.4
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -266,6 +266,14 @@ applyTheme(_theme);
 
 const app = initializeApp(firebaseConfig);
 const db  = getDatabase(app);
+
+// ── Estado de la carrera en memoria ────────────────────────────────────────
+let raceInfo           = {};   // info publicada por la mesa (nombre, zonas…)
+let pilots             = [];   // lista de pilotos
+let pilotScores        = {};   // { dorsal: { V1, V2, V3 } } solo de esta zona
+let pilotYellowCards   = {};   // { dorsal: tarjeta }
+let pilotObservations  = {};   // { dorsal: observacion }
+let recentHistory      = [];   // ultimas puntuaciones enviadas (para deshacer)
 
 // ── Sesion / acceso ────────────────────────────────────────────────────────
 const qs = new URLSearchParams(location.search);
