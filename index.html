@@ -182,6 +182,7 @@ body{display:flex;flex-direction:column;height:100vh}
     <div class="hdr-race" id="hdrRace">Conectando…</div>
   </div>
   <div style="display:flex;align-items:center;gap:10px">
+    <button onclick="window.showTrace()" title="Ver diagnóstico" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:14px;cursor:pointer">🔍</button>
     <button onclick="window.judgeLogout()" title="Cambiar de zona" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:14px;cursor:pointer">⇄</button>
     <button id="themeBtn" onclick="toggleTheme()" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:16px;cursor:pointer">🌙</button>
     <div class="hdr-status" id="hdrStatus" title="Estado de conexión"></div>
@@ -189,6 +190,7 @@ body{display:flex;flex-direction:column;height:100vh}
 </div>
 
 <div class="conn-bar" id="connBar"></div>
+<div id="traceBox" style="display:none;font-family:monospace;font-size:10px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--border);max-height:130px;overflow-y:auto"></div>
 
 <div class="main">
   <div class="search-bar">
@@ -219,7 +221,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.08.12.1
+      versión 2026.08.12.2
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -392,8 +394,14 @@ async function enterAsJudge(z, fromSession) {
   saveSession({ raceId, zone, ts: Date.now() });
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('hdrZone').textContent = zone;
-  startPresence();
-  setupListeners();
+  trace('Entrando en zona ' + zone + ' · carrera ' + raceId);
+  try { startPresence(); trace('Presencia enviada'); }
+  catch(e) { trace('Fallo al enviar presencia: ' + e.message, true); }
+  try { setupListeners(); trace('Escuchando datos de la carrera…'); }
+  catch(e) {
+    trace('Fallo al conectar con los datos: ' + e.message, true);
+    showLoadProblem('No se ha podido abrir la conexión', e.message);
+  }
 }
 
 // ── Presencia: latido periodico para que la mesa vea la zona conectada ─────
@@ -409,6 +417,24 @@ function startPresence() {
 }
 
 initLogin();
+
+// ── Traza de arranque visible en el propio movil ───────────────────────────
+// Sin ella, cualquier error deja la pantalla en "Cargando pilotos" sin motivo.
+const _trace = [];
+function trace(msg, isErr) {
+  _trace.push({ t: new Date().toLocaleTimeString('es-ES'), msg, isErr });
+  const box = document.getElementById('traceBox');
+  if (box) {
+    box.style.display = 'block';
+    box.innerHTML = _trace.map(x =>
+      `<div style="color:${x.isErr ? '#f87171' : 'var(--muted)'}">${x.t} · ${x.msg}</div>`
+    ).join('');
+  }
+  if (isErr) console.error(msg); else console.log(msg);
+}
+window.addEventListener('error', e => trace('ERROR: ' + e.message + ' (' + (e.lineno||'?') + ')', true));
+window.addEventListener('unhandledrejection', e => trace('PROMESA: ' + (e.reason && e.reason.message ? e.reason.message : e.reason), true));
+window.showTrace = function(){ const b=document.getElementById('traceBox'); if(b) b.style.display = b.style.display==='none'?'block':'none'; };
 
 function showLoadProblem(title, detail) {
   const list = document.getElementById('pilotList');
@@ -445,6 +471,7 @@ function setupListeners() {
   onValue(raceRef, snap => {
     gotSnapshot = true;
     const d = snap.val() || {};
+    trace('Datos recibidos · pilotos: ' + (d.pilots ? Object.keys(d.pilots).length : 0));
     if (!d.pilots) {
       showLoadProblem('La carrera aún no tiene pilotos publicados',
         'En la mesa, abre la pestaña 📡 Jueces y pulsa "Guardar y publicar" para enviar la lista de pilotos.');
