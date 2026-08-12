@@ -89,7 +89,7 @@ body{display:flex;flex-direction:column;height:100vh}
 .pilot-club{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pilot-cat{padding:2px 8px;border-radius:10px;font-size:10px;font-weight:900;letter-spacing:1px;color:#fff}
 .pilot-laps{display:flex;gap:3px;align-items:center}
-.lap-dot{width:18px;height:18px;border-radius:50%;font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--muted);border:1px solid var(--border)}
+.lap-dot{min-width:26px;height:20px;padding:0 5px;border-radius:5px;font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--muted);border:1px solid var(--border);letter-spacing:.5px}
 .lap-dot.filled{background:#16a34a;color:#fff;border-color:#16a34a}
 
 .cat-TR1{background:#b91c1c}.cat-TR2{background:#1d4ed8}.cat-TR3{background:#15803d}
@@ -128,15 +128,15 @@ body{display:flex;flex-direction:column;height:100vh}
 .modal-btn{flex:1;padding:12px;border-radius:10px;border:none;font-size:13px;font-weight:700;cursor:pointer;background:var(--border);color:var(--text);letter-spacing:1px}
 
 /* History */
-.history{position:fixed;bottom:0;left:0;right:0;background:var(--history-bg);border-top:1px solid var(--border);padding:10px 14px;max-height:110px;overflow-y:auto}
+.history{position:fixed;bottom:0;left:0;right:0;background:var(--history-bg);border-top:1px solid var(--border);padding:9px 14px 12px}
 .history-title{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:4px}
-.history-item{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px}
+.history-item{display:flex;align-items:center;gap:10px;padding:2px 0;font-size:15px;border-bottom:none}
 .history-item:last-child{border-bottom:none}
-.h-dorsal{font-family:'Space Mono',monospace;font-weight:800;color:var(--accent);min-width:36px}
-.h-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--muted)}
-.h-lap{font-size:10px;color:var(--accent);font-weight:700;letter-spacing:1px}
-.h-score{font-weight:900;font-family:'Space Mono',monospace;min-width:18px;text-align:center}
-.h-undo{background:transparent;border:none;color:var(--muted);font-size:14px;cursor:pointer;padding:2px 4px}
+.h-dorsal{font-family:'Space Mono',monospace;font-weight:800;color:var(--accent);min-width:44px;font-size:20px}
+.h-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--text)}
+.h-lap{font-size:13px;color:var(--accent);font-weight:800;letter-spacing:1px}
+.h-score{font-weight:900;font-family:'Space Mono',monospace;min-width:30px;text-align:center;font-size:26px;line-height:1}
+.h-undo{background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:20px;cursor:pointer;padding:6px 12px;min-width:48px}
 .h-score.s-0{color:#16a34a}.h-score.s-1{color:#60a5fa}.h-score.s-2{color:#f59e0b}.h-score.s-3{color:#f87171}.h-score.s-5{color:#dc2626}
 
 /* Error */
@@ -182,7 +182,6 @@ body{display:flex;flex-direction:column;height:100vh}
     <div class="hdr-race" id="hdrRace">Conectando…</div>
   </div>
   <div style="display:flex;align-items:center;gap:10px">
-    <button onclick="window.showTrace()" title="Ver diagnóstico" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:14px;cursor:pointer">🔍</button>
     <button onclick="window.judgeLogout()" title="Cambiar de zona" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:14px;cursor:pointer">⇄</button>
     <button id="themeBtn" onclick="toggleTheme()" style="background:transparent;border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:16px;cursor:pointer">🌙</button>
     <div class="hdr-status" id="hdrStatus" title="Estado de conexión"></div>
@@ -221,7 +220,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.08.12.4
+      versión 2026.08.12.5
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -232,7 +231,7 @@ body{display:flex;flex-direction:column;height:100vh}
 
 <!-- History footer -->
 <div class="history" id="history" style="display:none">
-  <div class="history-title">Últimas puntuaciones registradas</div>
+  <div class="history-title">Última puntuación registrada</div>
   <div id="historyList"></div>
 </div>
 
@@ -443,6 +442,21 @@ function trace(msg, isErr) {
 window.addEventListener('error', e => trace('ERROR: ' + e.message + ' (' + (e.lineno||'?') + ')', true));
 window.addEventListener('unhandledrejection', e => trace('PROMESA: ' + (e.reason && e.reason.message ? e.reason.message : e.reason), true));
 window.showTrace = function(){ const b=document.getElementById('traceBox'); if(b) b.style.display = b.style.display==='none'?'block':'none'; };
+// El diagnóstico no debe estar a la vista del juez: se abre manteniendo
+// pulsado 2 s el título de la cabecera. Nunca aparece solo.
+(function(){
+  const t = document.querySelector('.hdr-title');
+  if (!t) return;
+  let timer = null;
+  const start = () => { timer = setTimeout(() => window.showTrace(), 2000); };
+  const stop  = () => { clearTimeout(timer); };
+  t.addEventListener('touchstart', start, {passive:true});
+  t.addEventListener('touchend', stop);
+  t.addEventListener('touchmove', stop);
+  t.addEventListener('mousedown', start);
+  t.addEventListener('mouseup', stop);
+  t.addEventListener('mouseleave', stop);
+})();
 
 function showLoadProblem(title, detail) {
   const list = document.getElementById('pilotList');
@@ -560,7 +574,7 @@ function renderPilots() {
     for (let i = 1; i <= numLaps; i++) {
       const v = sc['V'+i];
       const filled = v !== undefined && v !== null;
-      laps.push(`<div class="lap-dot ${filled?'filled':''}">${filled ? v : i}</div>`);
+      laps.push(`<div class="lap-dot ${filled?'filled':''}">${filled ? v : 'V'+i}</div>`);
     }
     const allDone = Object.keys(sc).length >= numLaps;
     const hasYC  = pilotYellowCards[p.dorsal];
@@ -904,7 +918,8 @@ function renderHistory() {
   const list = document.getElementById('historyList');
   if (!recentHistory.length) { h.style.display = 'none'; return; }
   h.style.display = 'block';
-  list.innerHTML = recentHistory.map(r => {
+  // Solo la última: un error casi siempre está en la puntuación recién metida
+  list.innerHTML = recentHistory.slice(0, 1).map(r => {
     if (r.deleted) {
       return `<div class="history-item" style="opacity:0.6">
         <span class="h-dorsal">${r.dorsal}</span>
