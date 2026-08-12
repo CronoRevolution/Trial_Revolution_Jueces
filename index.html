@@ -220,7 +220,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.08.12.7
+      versión 2026.08.12.8
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -318,6 +318,27 @@ let racePassword = null;
 let numZonesCfg  = 7;
 let selectedZone = null;
 
+// ── Copia local de la carrera ──────────────────────────────────────────────
+// Permite entrar y puntuar aunque el juez llegue a su zona ya sin cobertura.
+const CACHE_KEY = 'judge_race_cache';
+function saveRaceCache(data) {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ ...data, ts: Date.now() })); } catch(e){}
+}
+function loadRaceCache() {
+  try { return JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch(e){ return null; }
+}
+let usingCache = false;
+
+function markUsingCache(cache) {
+  usingCache = true;
+  const bar = document.getElementById('connBar');
+  if (bar) {
+    bar.className = 'conn-bar off';
+    const mins = Math.round((Date.now() - (cache.ts || 0)) / 60000);
+    bar.textContent = `SIN CONEXIÓN · datos guardados hace ${mins} min · se enviará todo al recuperarla`;
+  }
+}
+
 // ── Descubrir la carrera activa y preparar el login ────────────────────────
 async function initLogin() {
   const errEl = document.getElementById('loginErr');
@@ -364,7 +385,34 @@ async function initLogin() {
       enterAsJudge(s.zone, true);
     }
   } catch(e) {
-    errEl.textContent = 'No se puede conectar. Revisa tu cobertura.';
+    // Sin conexión: intentar arrancar con la última copia guardada
+    const cache = loadRaceCache();
+    if (cache && cache.pilots && cache.pilots.length) {
+      trace('Sin conexión · usando copia local de la carrera');
+      raceId        = cache.raceId;
+      racePassword  = cache.password;
+      numZonesCfg   = cache.numZones || 7;
+      document.getElementById('loginRace').textContent =
+        (cache.raceName || 'Carrera') + ' · sin conexión';
+      const grid = document.getElementById('zoneGrid');
+      grid.innerHTML = '';
+      for (let z = 1; z <= numZonesCfg; z++) {
+        const b = document.createElement('button');
+        b.className = 'zbtn'; b.textContent = z;
+        b.onclick = () => {
+          selectedZone = z;
+          document.querySelectorAll('.zbtn').forEach(x => x.classList.remove('sel'));
+          b.classList.add('sel');
+          document.getElementById('pickedZone').textContent = 'Vas a puntuar la ZONA ' + z;
+          document.getElementById('loginBtn').disabled = false;
+        };
+        grid.appendChild(b);
+      }
+      const s = loadSession();
+      if (s && s.raceId === raceId && s.zone) { selectedZone = s.zone; enterAsJudge(s.zone, true); }
+      return;
+    }
+    errEl.textContent = 'No se puede conectar y no hay datos guardados en este móvil.';
     console.error(e);
   }
 }
@@ -490,11 +538,31 @@ function setupListeners() {
 
   // Si en 8 s no ha llegado nada, decir por qué en vez de dejarlo cargando
   setTimeout(() => {
-    if (!gotSnapshot) {
-      showLoadProblem('No llegan los datos de la carrera',
-        'Hay conexión, pero el servidor no ha enviado la lista de pilotos. ' +
-        'Comprueba en la mesa que la carrera está publicada para los jueces.');
+    if (gotSnapshot) return;
+    const cache = loadRaceCache();
+    if (cache && cache.pilots && cache.pilots.length && cache.raceId === raceId) {
+      // Arrancar con la copia local: mejor puntuar sin red que no poder empezar
+      trace('Sin respuesta del servidor · trabajando con la copia local');
+      raceInfo = { name: cache.raceName, numZones: cache.numZones, numLaps: 3 };
+      pilots   = cache.pilots;
+      pilotScores = {};
+      Object.entries(cache.scores || {}).forEach(([key, sc]) => {
+        const m = key.match(/^dorsal_(\d+)_zone_(\d+)_lap_(\d+)$/);
+        if (!m) return;
+        if (parseInt(m[2]) !== zone) return;
+        const dorsal = parseInt(m[1]);
+        if (!pilotScores[dorsal]) pilotScores[dorsal] = {};
+        pilotScores[dorsal]['V' + m[3]] = sc.score;
+      });
+      document.getElementById('hdrRace').textContent = (cache.raceName || '—');
+      markUsingCache(cache);
+      renderPilots();
+      renderHistory();
+      return;
     }
+    showLoadProblem('No llegan los datos de la carrera',
+      'Hay conexión, pero el servidor no ha enviado la lista de pilotos. ' +
+      'Comprueba en la mesa que la carrera está publicada para los jueces.');
   }, 8000);
 
   // Listener de info de carrera + pilotos
@@ -546,6 +614,12 @@ function setupListeners() {
 
     document.getElementById('hdrRace').textContent = raceInfo.name || '—';
     statusEl.classList.add('ok');
+    usingCache = false;
+    // Guardar copia local para poder trabajar si luego se pierde la cobertura
+    saveRaceCache({
+      raceId, raceName: raceInfo.name || '', numZones: raceInfo.numZones || 7,
+      password: racePassword, pilots, scores: d.scores || {}
+    });
     renderPilots();
     renderHistory();
   }, err => {
@@ -891,6 +965,13 @@ function paintConnection() {
   }
   if (!bar) return;
   bar.className = 'conn-bar';
+  if (!online && usingCache) {
+    bar.classList.add('off');
+    bar.textContent = pend
+      ? `SIN CONEXIÓN · copia local · ${pend} puntuación(es) guardadas`
+      : 'SIN CONEXIÓN · trabajando con la copia guardada en el móvil';
+    return;
+  }
   if (!online) {
     bar.classList.add('off');
     bar.textContent = pend
