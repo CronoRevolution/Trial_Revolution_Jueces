@@ -220,7 +220,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.08.12.6
+      versión 2026.08.12.7
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -280,10 +280,17 @@ let raceId = qs.get('race');          // opcional: si viene en la URL se respeta
 let zone   = parseInt(qs.get('zone')); // opcional
 let token  = qs.get('token') || '';    // compatibilidad con enlaces antiguos
 
-// Aplicacion independiente: registra su propio service worker (solo para poder
-// instalarse en el movil; no cachea, siempre va a red).
+// Sin service worker a proposito: la app se instala desde el APK, no desde el
+// navegador, asi que no aporta nada y solo puede servir copias antiguas.
+// Ademas, si un movil arrastra uno de una version anterior, lo eliminamos y
+// borramos sus caches para que siempre se cargue la ultima version publicada.
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js').catch(e => console.log('SW:', e.message));
+  navigator.serviceWorker.getRegistrations()
+    .then(rs => rs.forEach(r => r.unregister()))
+    .catch(() => {});
+}
+if (window.caches && caches.keys) {
+  caches.keys().then(ks => ks.forEach(k => caches.delete(k))).catch(() => {});
 }
 
 const auth = getAuth(app);
