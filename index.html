@@ -220,7 +220,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.08.12.5
+      versión 2026.08.12.6
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -432,7 +432,8 @@ function trace(msg, isErr) {
   _trace.push({ t: new Date().toLocaleTimeString('es-ES'), msg, isErr });
   const box = document.getElementById('traceBox');
   if (box) {
-    box.style.display = 'block';
+    // Se rellena siempre, pero NUNCA se muestra sola: el juez no debe verla.
+    // Solo se abre manteniendo pulsado el título de la cabecera.
     box.innerHTML = _trace.map(x =>
       `<div style="color:${x.isErr ? '#f87171' : 'var(--muted)'}">${x.t} · ${x.msg}</div>`
     ).join('');
