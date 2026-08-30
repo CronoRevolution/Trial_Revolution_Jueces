@@ -220,7 +220,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.08.26.2
+      versión 2026.08.26.3
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -963,10 +963,8 @@ window.deleteScore = async function(dorsal, lap) {
   }
   if (!confirm(`¿Eliminar la puntuación de V${lap} del dorsal ${dorsal}?`)) return;
   const key = `dorsal_${dorsal}_zone_${zone}_lap_${lap}`;
-  const marca = { dorsal, zone, lap, deleted: true, ts: Date.now(), source: 'judge', deviceId };
-  if (token) marca.token = token;
   try {
-    await set(ref(db, `races/${raceId}/scores/${key}`), marca);
+    await _borraPuntuacion(key, dorsal, lap);
     try { history.back(); } catch(e) { document.getElementById('scoreModal').style.display='none'; }
     showToast(`🗑 Eliminada V${lap} de #${dorsal}`);
     // Marcar en historial local como "borrado"
@@ -1089,16 +1087,24 @@ window.addEventListener('online', flushOfflineQueue);
 flushOfflineQueue(); // intentar al cargar
 paintConnection();
 
+// Quitar una puntuacion. Dos formas segun el modo:
+//   legacy -> remove(), como siempre. Las reglas publicadas exigen el campo
+//             'score' en cada registro, asi que una marca seria rechazada.
+//   token  -> marca { deleted: true }. Un remove no lleva datos y la regla no
+//             puede pedirle contrasena; una marca si, y deja rastro.
+async function _borraPuntuacion(key, dorsal, lap) {
+  const destino = ref(db, `races/${raceId}/scores/${key}`);
+  if (authMode !== 'token') return remove(destino);
+  const marca = { dorsal, zone, lap, deleted: true, ts: Date.now(), source: 'judge', deviceId };
+  if (token) marca.token = token;
+  return set(destino, marca);
+}
+
 window.undoScore = async function(key) {
   try {
-    // Igual que deleteScore: marca, no remove. La clave lleva dentro dorsal,
-    // zona y vuelta, asi que la marca se reconstruye desde ahi.
     const m = /^dorsal_(\d+)_zone_(\d+)_lap_(\d+)$/.exec(key);
     if (!m) { showToast('⚠ Clave no reconocida', 'err'); return; }
-    const marca = { dorsal: parseInt(m[1]), zone: parseInt(m[2]), lap: parseInt(m[3]),
-                    deleted: true, ts: Date.now(), source: 'judge', deviceId };
-    if (token) marca.token = token;
-    await set(ref(db, `races/${raceId}/scores/${key}`), marca);
+    await _borraPuntuacion(key, parseInt(m[1]), parseInt(m[3]));
     recentHistory = recentHistory.filter(h => h.key !== key);
     renderHistory();
     showToast('✓ Puntuación eliminada');
