@@ -220,7 +220,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.08.24.1
+      versión 2026.08.26.2
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -278,7 +278,31 @@ let recentHistory      = [];   // ultimas puntuaciones enviadas (para deshacer)
 const qs = new URLSearchParams(location.search);
 let raceId = qs.get('race');          // opcional: si viene en la URL se respeta
 let zone   = parseInt(qs.get('zone')); // opcional
-let token  = qs.get('token') || '';    // compatibilidad con enlaces antiguos
+// El "token" es la contrasena de la carrera. Se llama token porque es lo que
+// viaja en cada escritura y lo que comprueba la regla del servidor.
+//
+// Hasta ahora la contrasena se leia de races/{raceId}/judge_password y se
+// comparaba aqui, en el movil. Eso no protegia nada: ese nodo lo puede leer
+// cualquiera que se autentique de forma anonima. Ahora el secreto vive en
+// judge_secrets, que nadie puede leer, y la comprobacion la hace el servidor.
+const TOKEN_KEY = 'judge_token';
+let token = '';
+let authMode = 'legacy';   // 'token' cuando las reglas nuevas estan publicadas
+
+function tokenGuardado(carrera){
+  try {
+    const m = JSON.parse(localStorage.getItem(TOKEN_KEY) || '{}');
+    return m[carrera] || '';
+  } catch(e){ return ''; }
+}
+function guardarToken(carrera, t){
+  if (!carrera || !t) return;
+  try {
+    const m = JSON.parse(localStorage.getItem(TOKEN_KEY) || '{}');
+    m[carrera] = t;
+    localStorage.setItem(TOKEN_KEY, JSON.stringify(m));
+  } catch(e){}
+}
 
 // Sin service worker a proposito: la app se instala desde el APK, no desde el
 // navegador, asi que no aporta nada y solo puede servir copias antiguas.
@@ -310,6 +334,8 @@ function loadSession(){ try { return JSON.parse(localStorage.getItem(SESSION_KEY
 window.judgeLogout = function(){
   if (!confirm('¿Salir y elegir otra zona?')) return;
   try { localStorage.removeItem(SESSION_KEY); } catch(e){}
+  // La contrasena se queda guardada: si el juez vuelve a entrar no hay que
+  // volver a teclearla en el movil.
   if (raceId && zone) remove(ref(db, `races/${raceId}/judge_presence/zone${zone}`)).catch(()=>{});
   location.href = location.pathname;
 };
@@ -358,8 +384,21 @@ async function initLogin() {
     if (info.name) document.getElementById('loginRace').textContent = info.name;
     numZonesCfg = info.numZones || 7;
 
-    const passSnap = await get(ref(db, `races/${raceId}/judge_password`));
-    racePassword = passSnap.val();
+    // Modo de acceso. Lo pone la mesa al publicar: 'token' significa que las
+    // reglas nuevas estan activas y que la contrasena la valida el servidor.
+    try {
+      const amSnap = await get(ref(db, `races/${raceId}/auth_mode`));
+      authMode = amSnap.val() === 'token' ? 'token' : 'legacy';
+    } catch(e) { authMode = 'legacy'; }
+
+    if (authMode === 'legacy') {
+      // Modo antiguo: la contrasena se lee y se compara aqui. Se mantiene para
+      // que la app siga funcionando mientras no se publiquen las reglas nuevas.
+      const passSnap = await get(ref(db, `races/${raceId}/judge_password`));
+      racePassword = passSnap.val();
+    } else {
+      racePassword = null;   // no hay nada legible que comparar
+    }
 
     // Pintar botones de zona
     const grid = document.getElementById('zoneGrid');
@@ -382,6 +421,7 @@ async function initLogin() {
     const s = loadSession();
     if (s && s.raceId === raceId && s.zone) {
       selectedZone = s.zone;
+      token = s.token || tokenGuardado(raceId);   // sin esto la 1a puntuacion iria sin token
       enterAsJudge(s.zone, true);
     }
   } catch(e) {
@@ -409,7 +449,11 @@ async function initLogin() {
         grid.appendChild(b);
       }
       const s = loadSession();
-      if (s && s.raceId === raceId && s.zone) { selectedZone = s.zone; enterAsJudge(s.zone, true); }
+      if (s && s.raceId === raceId && s.zone) {
+        selectedZone = s.zone;
+        token = s.token || tokenGuardado(raceId);
+        enterAsJudge(s.zone, true);
+      }
       return;
     }
     errEl.textContent = 'No se puede conectar y no hay datos guardados en este móvil.';
@@ -424,14 +468,47 @@ window.togglePass = function(show) {
 
 window.doLogin = async function() {
   const errEl = document.getElementById('loginErr');
+  const btn   = document.getElementById('loginBtn');
   const pass  = (document.getElementById('loginPass').value || '').trim();
   errEl.textContent = '';
   if (!selectedZone) { errEl.textContent = 'Elige una zona'; return; }
-  if (racePassword && pass !== racePassword) {
-    errEl.textContent = 'Contraseña incorrecta';
+
+  if (authMode === 'legacy') {
+    // Comprobacion local de siempre, contra el nodo legible.
+    if (racePassword && pass !== racePassword) {
+      errEl.textContent = 'Contraseña incorrecta';
+      return;
+    }
+    token = pass;                 // se manda igualmente, no estorba
+    await enterAsJudge(selectedZone, false);
     return;
   }
-  await enterAsJudge(selectedZone, false);
+
+  // Modo token: la contrasena no se puede leer, asi que la unica forma de
+  // saber si es correcta es intentar escribir algo que la regla proteja. Si el
+  // servidor acepta el registro de entrada, la contrasena vale. Es preferible
+  // a dejar entrar y que falle la primera puntuacion en mitad de la zona.
+  if (!pass) { errEl.textContent = 'Escribe la contraseña'; return; }
+  const textoBtn = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'COMPROBANDO…'; }
+  try {
+    await set(ref(db, `judge_checkin/${raceId}/${deviceId}`), {
+      zone: selectedZone, token: pass, ts: Date.now()
+    });
+    token = pass;
+    guardarToken(raceId, token);
+    await enterAsJudge(selectedZone, false);
+  } catch(e) {
+    // PERMISSION_DENIED es lo esperado con una contrasena mala. Cualquier otro
+    // fallo (sin cobertura, por ejemplo) se dice tal cual: no es lo mismo.
+    const denegado = /permission|denied/i.test(e.message || '');
+    errEl.textContent = denegado
+      ? 'Contraseña incorrecta'
+      : 'No se ha podido comprobar la contraseña: ' + (e.message || 'sin conexión');
+    console.warn('checkin:', e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = textoBtn || 'ENTRAR'; }
+  }
 };
 
 // Comprueba si otro telefono tiene ya esa zona y entra
@@ -453,7 +530,9 @@ async function enterAsJudge(z, fromSession) {
   } catch(e) { /* sin red: se permite entrar y ya sincronizara */ }
 
   zone = z;
-  saveSession({ raceId, zone, ts: Date.now() });
+  if (!token) token = tokenGuardado(raceId);   // sesion reanudada
+  guardarToken(raceId, token);
+  saveSession({ raceId, zone, token, ts: Date.now() });
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('hdrZone').textContent = zone;
   trace('Entrando en zona ' + zone + ' · carrera ' + raceId);
@@ -550,6 +629,7 @@ function setupListeners() {
         const m = key.match(/^dorsal_(\d+)_zone_(\d+)_lap_(\d+)$/);
         if (!m) return;
         if (parseInt(m[2]) !== zone) return;
+        if (!sc || sc.deleted === true) return;   // marca de borrado
         const dorsal = parseInt(m[1]);
         if (!pilotScores[dorsal]) pilotScores[dorsal] = {};
         pilotScores[dorsal]['V' + m[3]] = sc.score;
@@ -592,6 +672,7 @@ function setupListeners() {
         const z = parseInt(m[2]);
         const l = parseInt(m[3]);
         if (z !== zone) return; // solo scores de esta zona
+        if (!sc || sc.deleted === true) return;   // marca de borrado
         if (!pilotScores[dorsal]) pilotScores[dorsal] = {};
         pilotScores[dorsal]['V' + l] = sc.score;
       });
@@ -601,6 +682,7 @@ function setupListeners() {
     pilotYellowCards = {};
     if (d.yellow_cards) {
       Object.entries(d.yellow_cards).forEach(([key, yc]) => {
+        if (!yc || yc.deleted === true) return;   // marca de borrado
         if (yc.zone === zone && yc.dorsal) pilotYellowCards[yc.dorsal] = yc;
       });
     }
@@ -608,6 +690,7 @@ function setupListeners() {
     pilotObservations = {};
     if (d.observations) {
       Object.entries(d.observations).forEach(([key, ob]) => {
+        if (!ob || ob.deleted === true) return;   // marca de borrado
         if (ob.zone === zone && ob.dorsal) pilotObservations[ob.dorsal] = ob;
       });
     }
@@ -804,9 +887,9 @@ window.submitYellowCard = async function(dorsal) {
   if (!reason) { showToast('Indica el motivo de la tarjeta', 'err'); return; }
   const key = `dorsal_${dorsal}_zone_${zone}`;
   try {
-    await set(ref(db, `races/${raceId}/yellow_cards/${key}`), {
-      dorsal, zone, reason, ts: Date.now(), deviceId, source: 'judge'
-    });
+    const yc = { dorsal, zone, reason, ts: Date.now(), deviceId, source: 'judge' };
+    if (token) yc.token = token;
+    await set(ref(db, `races/${raceId}/yellow_cards/${key}`), yc);
     showToast(`🟨 Tarjeta amarilla #${dorsal} registrada`);
     try { history.back(); } catch(e) { document.getElementById('scoreModal').style.display='none'; }
   } catch(e) {
@@ -817,7 +900,14 @@ window.removeYellowCard = async function(dorsal) {
   if (!confirm('¿Eliminar esta tarjeta amarilla?')) return;
   const key = `dorsal_${dorsal}_zone_${zone}`;
   try {
-    await remove(ref(db, `races/${raceId}/yellow_cards/${key}`));
+    // Marca de borrado, no remove: la regla no puede pedir token a un remove.
+    // Se conserva el motivo porque la validacion lo exige y porque asi queda
+    // el rastro de que tarjeta se retiro.
+    const anterior = (pilotYellowCards[dorsal] || {}).reason || '(sin motivo)';
+    const marca = { dorsal, zone, reason: anterior, deleted: true,
+                    ts: Date.now(), deviceId, source: 'judge' };
+    if (token) marca.token = token;
+    await set(ref(db, `races/${raceId}/yellow_cards/${key}`), marca);
     showToast('✓ Tarjeta eliminada');
     try { history.back(); } catch(e){}
   } catch(e) { showToast('⚠ Error', 'err'); }
@@ -828,9 +918,9 @@ window.submitObservation = async function(dorsal) {
   if (!text) { showToast('Escribe la observación', 'err'); return; }
   const key = `dorsal_${dorsal}_zone_${zone}`;
   try {
-    await set(ref(db, `races/${raceId}/observations/${key}`), {
-      dorsal, zone, text, ts: Date.now(), deviceId, source: 'judge'
-    });
+    const obs = { dorsal, zone, text, ts: Date.now(), deviceId, source: 'judge' };
+    if (token) obs.token = token;
+    await set(ref(db, `races/${raceId}/observations/${key}`), obs);
     showToast(`📝 Observación #${dorsal} enviada`);
     try { history.back(); } catch(e) { document.getElementById('scoreModal').style.display='none'; }
   } catch(e) {
@@ -841,7 +931,13 @@ window.removeObservation = async function(dorsal) {
   if (!confirm('¿Eliminar esta observación?')) return;
   const key = `dorsal_${dorsal}_zone_${zone}`;
   try {
-    await remove(ref(db, `races/${raceId}/observations/${key}`));
+    // Marca de borrado. Se conserva el texto: la validacion lo exige y deja
+    // constancia de que observacion se retiro.
+    const anterior = (pilotObservations[dorsal] || {}).text || '(sin texto)';
+    const marca = { dorsal, zone, text: anterior, deleted: true,
+                    ts: Date.now(), deviceId, source: 'judge' };
+    if (token) marca.token = token;
+    await set(ref(db, `races/${raceId}/observations/${key}`), marca);
     showToast('✓ Observación eliminada');
     try { history.back(); } catch(e){}
   } catch(e) { showToast('⚠ Error', 'err'); }
@@ -867,8 +963,10 @@ window.deleteScore = async function(dorsal, lap) {
   }
   if (!confirm(`¿Eliminar la puntuación de V${lap} del dorsal ${dorsal}?`)) return;
   const key = `dorsal_${dorsal}_zone_${zone}_lap_${lap}`;
+  const marca = { dorsal, zone, lap, deleted: true, ts: Date.now(), source: 'judge', deviceId };
+  if (token) marca.token = token;
   try {
-    await remove(ref(db, `races/${raceId}/scores/${key}`));
+    await set(ref(db, `races/${raceId}/scores/${key}`), marca);
     try { history.back(); } catch(e) { document.getElementById('scoreModal').style.display='none'; }
     showToast(`🗑 Eliminada V${lap} de #${dorsal}`);
     // Marcar en historial local como "borrado"
@@ -885,6 +983,7 @@ window.submitScore = async function(dorsal, lap, score) {
   const p = pilots.find(x => x.dorsal === dorsal);
   const key = `dorsal_${dorsal}_zone_${zone}_lap_${lap}`;
   const payload = { dorsal, zone, lap, score, ts: Date.now(), source: 'judge', deviceId };
+  if (token) payload.token = token;   // la regla lo comprueba en el servidor
 
   // Añadir al historial local inmediatamente (optimistic UI)
   try { history.back(); } catch(e) { document.getElementById('scoreModal').style.display='none'; }
@@ -992,7 +1091,14 @@ paintConnection();
 
 window.undoScore = async function(key) {
   try {
-    await remove(ref(db, `races/${raceId}/scores/${key}`));
+    // Igual que deleteScore: marca, no remove. La clave lleva dentro dorsal,
+    // zona y vuelta, asi que la marca se reconstruye desde ahi.
+    const m = /^dorsal_(\d+)_zone_(\d+)_lap_(\d+)$/.exec(key);
+    if (!m) { showToast('⚠ Clave no reconocida', 'err'); return; }
+    const marca = { dorsal: parseInt(m[1]), zone: parseInt(m[2]), lap: parseInt(m[3]),
+                    deleted: true, ts: Date.now(), source: 'judge', deviceId };
+    if (token) marca.token = token;
+    await set(ref(db, `races/${raceId}/scores/${key}`), marca);
     recentHistory = recentHistory.filter(h => h.key !== key);
     renderHistory();
     showToast('✓ Puntuación eliminada');
