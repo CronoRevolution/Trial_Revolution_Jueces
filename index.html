@@ -6,6 +6,68 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
+<!-- ══════════════════════════════════════════════════════════════════════
+     DIAGNOSTICO DE ARRANQUE
+     Escrito a proposito en JavaScript antiguo (sin modulos, sin flecha, sin
+     const) para que funcione TAMBIEN en el navegador que no puede con el
+     resto de la aplicacion. Si algo impide arrancar, en vez de una pantalla
+     muerta sale un mensaje que se puede leer y dictar por telefono.
+     ══════════════════════════════════════════════════════════════════════ -->
+<script nomodule>
+  window.__trSinModulos = true;   // solo lo ejecutan los navegadores sin modulos ES
+</script>
+<script>
+(function () {
+  window.__trArranque = { modulo: false, firebase: false };
+  var fallos = [];
+
+  function caja() {
+    var d = document.getElementById('trDiag');
+    if (!d) {
+      d = document.createElement('div');
+      d.id = 'trDiag';
+      d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;' +
+        'background:#7f1d1d;color:#fff;font:13px/1.5 sans-serif;padding:12px 14px;' +
+        'max-height:60%;overflow:auto;-webkit-overflow-scrolling:touch';
+      (document.body || document.documentElement).appendChild(d);
+    }
+    return d;
+  }
+
+  function avisa(titulo, detalle) {
+    fallos.push(titulo);
+    var d = caja();
+    var h = '<div style="font-weight:700;margin-bottom:6px">⚠ ' + titulo + '</div>';
+    if (detalle) h += '<div style="font-size:11px;opacity:.9;word-break:break-word">' + detalle + '</div>';
+    h += '<div style="font-size:11px;opacity:.75;margin-top:8px">Navegador: ' + navigator.userAgent + '</div>';
+    d.innerHTML = h;
+  }
+
+  window.addEventListener('error', function (e) {
+    avisa('Error al cargar la aplicación',
+          (e.message || 'error') + (e.filename ? ' · ' + e.filename + ':' + e.lineno : ''));
+  }, true);
+
+  window.addEventListener('unhandledrejection', function (e) {
+    var m = e && e.reason ? (e.reason.message || String(e.reason)) : 'desconocido';
+    avisa('Fallo al conectar', m);
+  });
+
+  setTimeout(function () {
+    if (fallos.length) return;
+    if (window.__trSinModulos) {
+      avisa('Este navegador es demasiado antiguo',
+            'No admite módulos de JavaScript. Actualiza Chrome desde Play Store.');
+    } else if (!window.__trArranque.modulo) {
+      avisa('El programa no ha llegado a arrancar',
+            'El navegador no ha ejecutado el código. Suele ser un Chrome antiguo o sin conexión a www.gstatic.com.');
+    } else if (!window.__trArranque.firebase) {
+      avisa('Arrancó, pero no conectó con el servidor',
+            'Comprueba la conexión del teléfono.');
+    }
+  }, 10000);
+})();
+</script>
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
 <link rel="manifest" href="./manifest.json">
 <meta name="theme-color" content="#f59e0b">
@@ -45,7 +107,7 @@ body{display:flex;flex-direction:column;height:100vh}
 .conn-bar.pend{display:block;background:#78350f;color:#fde68a}
 
 /* Pantalla de acceso */
-.login{position:fixed;inset:0;background:var(--bg);z-index:200;display:flex;flex-direction:column;
+.login{position:fixed;top:0;right:0;bottom:0;left:0;inset:0;background:var(--bg);z-index:200;display:flex;flex-direction:column;
   align-items:center;justify-content:center;padding:24px;gap:16px}
 .login h1{font-size:20px;letter-spacing:3px;color:var(--accent);font-weight:900}
 .login .sub{font-size:12px;color:var(--muted);letter-spacing:1px;text-align:center;margin-top:-8px}
@@ -100,7 +162,7 @@ body{display:flex;flex-direction:column;height:100vh}
 .empty-title{font-size:16px;font-weight:800;margin-bottom:6px;color:var(--muted)}
 
 /* Score modal */
-.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,0.85);backdrop-filter:blur(6px);z-index:100;display:flex;align-items:flex-end;justify-content:center;animation:fadeIn .2s}
+.modal-bg{position:fixed;top:0;right:0;bottom:0;left:0;inset:0;background:rgba(0,0,0,0.85);backdrop-filter:blur(6px);z-index:100;display:flex;align-items:flex-end;justify-content:center;animation:fadeIn .2s}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
 .modal{background:var(--bg2);border:1px solid var(--border);border-radius:20px 20px 0 0;width:100%;max-width:560px;padding:20px;animation:slideUp .25s}
 @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
@@ -220,7 +282,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.08.26.3
+      versión 2026.09.04.2
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -263,8 +325,10 @@ function applyTheme(t) {
 window.toggleTheme = () => { _theme = _theme === 'dark' ? 'light' : 'dark'; applyTheme(_theme); };
 applyTheme(_theme);
 
+if (window.__trArranque) window.__trArranque.modulo = true;   // ver diagnostico de la cabecera
 const app = initializeApp(firebaseConfig);
 const db  = getDatabase(app);
+if (window.__trArranque) window.__trArranque.firebase = true;
 
 // ── Estado de la carrera en memoria ────────────────────────────────────────
 let raceInfo           = {};   // info publicada por la mesa (nombre, zonas…)
@@ -968,7 +1032,7 @@ window.deleteScore = async function(dorsal, lap) {
     try { history.back(); } catch(e) { document.getElementById('scoreModal').style.display='none'; }
     showToast(`🗑 Eliminada V${lap} de #${dorsal}`);
     // Marcar en historial local como "borrado"
-    recentHistory.unshift({ dorsal, lap, score: '—', ts: Date.now(), key, name: p?.name, deleted: true });
+    recentHistory.unshift({ dorsal, lap, score: '—', ts: Date.now(), key, name: p ? p.name : '', deleted: true });
     if (recentHistory.length > 6) recentHistory.length = 6;
     renderHistory();
   } catch(e) {
@@ -985,7 +1049,7 @@ window.submitScore = async function(dorsal, lap, score) {
 
   // Añadir al historial local inmediatamente (optimistic UI)
   try { history.back(); } catch(e) { document.getElementById('scoreModal').style.display='none'; }
-  recentHistory.unshift({ dorsal, lap, score, ts: Date.now(), key, name: p?.name });
+  recentHistory.unshift({ dorsal, lap, score, ts: Date.now(), key, name: p ? p.name : '' });
   if (recentHistory.length > 6) recentHistory.length = 6;
   renderHistory();
 
