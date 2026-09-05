@@ -156,6 +156,30 @@ body{display:flex;flex-direction:column;height:100vh}
 
 .cat-TR1{background:#b91c1c}.cat-TR2{background:#1d4ed8}.cat-TR3{background:#15803d}
 .cat-TR4{background:#a16207}.cat-TR5{background:#c2410c}.cat-TR5A{background:#374151}
+/* Faltaban las de trial de niñ@s: la pastilla salía sin color. */
+.cat-TRA{background:#b91c1c}.cat-TRB{background:#1d4ed8}.cat-TRC{background:#15803d}
+
+/* El recuadro del dorsal, del color de la categoría: el juez ve de un vistazo
+   a quién tiene delante sin leer la pastilla pequeña. */
+.dcat-TR1,.dcat-TRA{background:#b91c1c!important;color:#fff!important}
+.dcat-TR2,.dcat-TRB{background:#1d4ed8!important;color:#fff!important}
+.dcat-TR3,.dcat-TRC{background:#15803d!important;color:#fff!important}
+.dcat-TR4{background:#a16207!important;color:#fff!important}
+.dcat-TR5{background:#c2410c!important;color:#fff!important}
+.dcat-TR5A{background:#374151!important;color:#fff!important}
+
+/* Piloto fuera de carrera: la mesa lo ha retirado, descalificado o dado por no salido */
+.pilot.fuera{opacity:.45}
+.pilot.fuera .pilot-dorsal{filter:grayscale(1)}
+.est-fuera{padding:2px 8px;border-radius:10px;font-size:10px;font-weight:900;letter-spacing:1px;
+  background:#7f1d1d;color:#fecaca;white-space:nowrap}
+.est-dns{background:#334155;color:#cbd5e1}
+
+/* Aviso de zona terminada */
+.zona-fin{background:rgba(22,163,74,.16);border:1px solid #16a34a;border-radius:12px;
+  padding:12px 14px;margin-bottom:10px;text-align:center}
+.zona-fin .t{font-size:15px;font-weight:900;letter-spacing:1px;color:#22c55e}
+.zona-fin .s{font-size:12px;color:var(--muted);margin-top:3px}
 
 /* Empty state */
 .empty{text-align:center;padding:40px 20px;color:var(--muted)}
@@ -282,7 +306,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.09.04.2
+      versión 2026.09.05.2
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -336,6 +360,7 @@ let pilots             = [];   // lista de pilotos
 let pilotScores        = {};   // { dorsal: { V1, V2, V3 } } solo de esta zona
 let pilotYellowCards   = {};   // { dorsal: tarjeta }
 let pilotObservations  = {};   // { dorsal: observacion }
+let pilotStatus        = {};   // { dorsal: 'dnf' | 'dsq' | 'dns' } — lo manda la mesa
 let recentHistory      = [];   // ultimas puntuaciones enviadas (para deshacer)
 
 // ── Sesion / acceso ────────────────────────────────────────────────────────
@@ -688,6 +713,7 @@ function setupListeners() {
       trace('Sin respuesta del servidor · trabajando con la copia local');
       raceInfo = { name: cache.raceName, numZones: cache.numZones, numLaps: 3 };
       pilots   = cache.pilots;
+      pilotStatus = cache.pilotStatus || {};
       pilotScores = {};
       Object.entries(cache.scores || {}).forEach(([key, sc]) => {
         const m = key.match(/^dorsal_(\d+)_zone_(\d+)_lap_(\d+)$/);
@@ -724,6 +750,16 @@ function setupListeners() {
     raceInfo = d.info || {};
     pilots = d.pilots ? Object.values(d.pilots) : [];
     pilotScores = {};
+    // Retirados / descalificados / no salidos, publicados por la mesa en
+    // races/{raceId}/pilot_status como { d12: 'dnf' }. Si no hay nadie, el
+    // nodo no existe y aquí queda un objeto vacío.
+    pilotStatus = {};
+    if (d.pilot_status) {
+      Object.keys(d.pilot_status).forEach(function (k) {
+        const n = parseInt(String(k).replace(/^d/, ''), 10);
+        if (n) pilotStatus[n] = d.pilot_status[k];
+      });
+    }
 
     // Reconstruir pilotScores leyendo los scores globales escritos por cualquier zona
     // y también los scores escritos por el cronómetro principal
@@ -765,7 +801,8 @@ function setupListeners() {
     // Guardar copia local para poder trabajar si luego se pierde la cobertura
     saveRaceCache({
       raceId, raceName: raceInfo.name || '', numZones: raceInfo.numZones || 7,
-      password: racePassword, pilots, scores: d.scores || {}
+      password: racePassword, pilots, scores: d.scores || {},
+      pilotStatus: pilotStatus
     });
     renderPilots();
     renderHistory();
@@ -796,7 +833,37 @@ function renderPilots() {
     return;
   }
 
-  list.innerHTML = filtered.map(p => {
+  // ── Estado de la zona ────────────────────────────────────────────────────
+  // Se cuenta sobre TODOS los pilotos, no sobre los que deja ver el buscador:
+  // si no, filtrar por un dorsal daría la zona por terminada.
+  //
+  // La app no sabe quién se ha retirado — races/{id}/pilots sólo lleva dorsal,
+  // nombre, categoría y club, y ese nodo no se reescribe durante la carrera—,
+  // así que en vez de un sí/no se enseña la cuenta y, cuando quedan pocos, qué
+  // dorsales faltan. Con un retirado el juez lo ve y sabe que ahí se acabó.
+  const _nl = raceInfo.numLaps || 3;
+  // Los que la mesa ha sacado de carrera no cuentan: si no, un retirado dejaría
+  // la zona sin terminar para siempre.
+  const _enCarrera = pilots.filter(p => !pilotStatus[p.dorsal]);
+  const _fuera = pilots.length - _enCarrera.length;
+  const _faltan = _enCarrera.filter(p => Object.keys(pilotScores[p.dorsal] || {}).length < _nl);
+  const _colaFuera = _fuera ? ' · ' + _fuera + ' fuera de carrera' : '';
+  let _cab = '';
+  if (_enCarrera.length && !_faltan.length) {
+    _cab = '<div class="zona-fin"><div class="t">✓ ZONA FINALIZADA</div>'
+         + '<div class="s">' + _enCarrera.length + ' pilotos · ' + _nl
+         + ' vueltas puntuadas' + _colaFuera + ' · puedes avisar a la mesa</div></div>';
+  } else if (_enCarrera.length && _faltan.length <= 5 && _faltan.length < _enCarrera.length) {
+    // La condición _faltan < total evita el aviso al empezar, cuando no hay
+    // nada puntuado y en una zona pequeña 'faltan 4' sería todos.
+    _cab = '<div class="zona-fin" style="background:rgba(245,158,11,.14);border-color:#f59e0b">'
+         + '<div class="t" style="color:#f59e0b">'
+         + (_faltan.length === 1 ? 'Falta 1 piloto' : 'Faltan ' + _faltan.length + ' pilotos')
+         + '</div>'
+         + '<div class="s">' + _faltan.map(p => '#' + p.dorsal).join(' · ') + _colaFuera + '</div></div>';
+  }
+
+  list.innerHTML = _cab + filtered.map(p => {
     const sc = pilotScores[p.dorsal] || {};
     const numLaps = raceInfo.numLaps || 3;
     const laps = [];
@@ -806,16 +873,18 @@ function renderPilots() {
       laps.push(`<div class="lap-dot ${filled?'filled':''}">${filled ? v : 'V'+i}</div>`);
     }
     const allDone = Object.keys(sc).length >= numLaps;
+    const est = pilotStatus[p.dorsal] || '';
+    const estTxt = est === 'dsq' ? 'DESCALIFICADO' : est === 'dns' ? 'NO SALE' : est === 'dnf' ? 'RETIRADO' : '';
     const hasYC  = pilotYellowCards[p.dorsal];
     const hasObs = pilotObservations[p.dorsal];
     const marks = (hasYC?'<span style="font-size:14px" title="Tarjeta amarilla">🟨</span>':'') + (hasObs?'<span style="font-size:14px" title="Observación">📝</span>':'');
-    return `<div class="pilot ${allDone?'done-all':''}" onclick="window.selectPilot(${p.dorsal})">
-      <div class="pilot-dorsal">${p.dorsal}</div>
+    return `<div class="pilot ${allDone&&!est?'done-all':''} ${est?'fuera':''}" onclick="window.selectPilot(${p.dorsal})">
+      <div class="pilot-dorsal dcat-${p.cat||''}">${p.dorsal}</div>
       <div class="pilot-info">
         <div class="pilot-name">${p.name || '—'} ${marks}</div>
         <div class="pilot-club">${p.club || ''}</div>
       </div>
-      <span class="pilot-cat cat-${p.cat}">${p.cat}</span>
+      ${estTxt ? `<span class="est-fuera ${est==='dns'?'est-dns':''}">${estTxt}</span>` : `<span class="pilot-cat cat-${p.cat}">${p.cat}</span>`}
       <div class="pilot-laps">${laps.join('')}</div>
     </div>`;
   }).join('');
@@ -835,6 +904,8 @@ function openPilotModal(p) {
 
   const sc = pilotScores[p.dorsal] || {};
   const numLaps = raceInfo.numLaps || 3;
+  const _est = pilotStatus[p.dorsal] || '';
+  const _estTxt = _est === 'dsq' ? 'DESCALIFICADO' : _est === 'dns' ? 'NO SALE' : _est === 'dnf' ? 'RETIRADO' : '';
 
   // Vuelta por defecto para Puntuar: primera sin puntuar
   let defaultLap = null;
@@ -869,10 +940,15 @@ function openPilotModal(p) {
     <div class="modal-bg" onclick="if(event.target===this){history.back()}">
       <div class="modal">
         <div class="modal-hdr">
-          <div class="modal-dorsal">${p.dorsal}</div>
+          <div class="modal-dorsal dcat-${p.cat||''}">${p.dorsal}</div>
           <div class="modal-name">${p.name}</div>
-          <span class="pilot-cat cat-${p.cat}">${p.cat}</span>
+          ${_est ? `<span class="est-fuera ${_est==='dns'?'est-dns':''}">${_estTxt}</span>`
+                 : `<span class="pilot-cat cat-${p.cat}">${p.cat}</span>`}
         </div>
+        ${_est ? `<div style="background:rgba(127,29,29,.25);border:1px solid #7f1d1d;border-radius:10px;
+          padding:10px 12px;margin-bottom:14px;font-size:12px;color:#fecaca;text-align:center">
+          La mesa ha dado a este piloto por <b>${_estTxt.toLowerCase()}</b>. Sigue pudiendo puntuar
+          si hace falta, pero normalmente ya no pasará por tu zona.</div>` : ''}
 
         <div class="modal-tabs">
           ${tabs.map(t => `<button class="modal-tab ${t.id===firstTab?'active':''}" data-tab="${t.id}" onclick="selectModalTab('${t.id}')"><span class="ico">${t.ico}</span>${t.label}</button>`).join('')}
