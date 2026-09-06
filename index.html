@@ -196,6 +196,35 @@ body{display:flex;flex-direction:column;height:100vh}
 .modal-lap{background:var(--accent);color:#000;padding:4px 12px;border-radius:8px;font-size:13px;font-weight:900;letter-spacing:1.5px}
 .modal-subtitle{font-size:12px;color:var(--muted);margin-bottom:14px;text-align:center}
 
+/* ── Cuenta atrás de zona ────────────────────────────────────────────── */
+.cro-box{border:2px solid var(--border);border-radius:14px;padding:12px;margin-bottom:14px;text-align:center}
+.cro-box.corriendo{border-color:#16a34a}
+.cro-box.ultimos{border-color:#f59e0b}
+.cro-box.cumplido{border-color:#dc2626;background:rgba(127,29,29,.22)}
+.cro-time{font-family:'Space Mono',monospace;font-size:46px;font-weight:900;line-height:1.05;
+  letter-spacing:2px;font-variant-numeric:tabular-nums}
+.cro-box.corriendo .cro-time{color:#16a34a}
+.cro-box.ultimos .cro-time{color:#f59e0b}
+.cro-box.cumplido .cro-time{color:#f87171}
+.cro-sub{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.45}
+.cro-msg{font-size:13px;font-weight:700;color:#fecaca;margin-top:6px;line-height:1.45}
+.cro-btn{width:100%;padding:16px;border:none;border-radius:12px;font-size:15px;font-weight:900;
+  letter-spacing:1px;cursor:pointer;margin-bottom:14px}
+.cro-btn.arranca{background:#16a34a;color:#fff}
+.cro-btn.confirma{background:#dc2626;color:#fff;margin:10px 0 0}
+.cro-btn.secundario{background:transparent;color:var(--muted);border:1px solid var(--border);
+  font-size:12px;padding:10px;margin:8px 0 0;letter-spacing:.5px}
+.cro-otro{border:1px solid #f59e0b;background:rgba(245,158,11,.12);color:#fcd34d;border-radius:10px;
+  padding:9px 11px;margin-bottom:12px;font-size:12px;text-align:center;line-height:1.45}
+/* Aviso flotante cuando la cuenta atrás sigue corriendo con la ficha cerrada.
+   No es la interfaz principal: es la red de seguridad para que un toque
+   accidental fuera del recuadro no deje al piloto sin cronometrar. */
+#croChip{position:fixed;left:12px;right:12px;bottom:12px;z-index:9000;display:none;
+  border-radius:12px;padding:12px 14px;font-size:14px;font-weight:800;text-align:center;
+  border:2px solid #16a34a;background:#052e16;color:#bbf7d0;cursor:pointer;
+  font-family:'Space Mono',monospace;letter-spacing:1px}
+#croChip.cumplido{border-color:#dc2626;background:#450a0a;color:#fecaca}
+
 .score-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}
 .score-btn{padding:22px 0;border-radius:14px;border:2px solid;background:var(--bg);font-size:32px;font-weight:900;font-family:'Space Mono',monospace;cursor:pointer;transition:transform .05s}
 .score-btn:active{transform:scale(0.94)}
@@ -306,7 +335,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.09.05.2
+      versión 2026.09.06.1
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -314,6 +343,7 @@ body{display:flex;flex-direction:column;height:100vh}
 
 <!-- Score modal -->
 <div id="scoreModal" style="display:none"></div>
+<div id="croChip" onclick="croAbreFicha()"></div>
 
 <!-- History footer -->
 <div class="history" id="history" style="display:none">
@@ -632,6 +662,9 @@ async function enterAsJudge(z, fromSession) {
     trace('Fallo al conectar con los datos: ' + e.message, true);
     showLoadProblem('No se ha podido abrir la conexión', e.message);
   }
+  // Si la app se recargó con una cuenta atrás en marcha, se reanuda aquí y no
+  // antes: sobre la pantalla de acceso no pinta nada.
+  croRecupera();
 }
 
 // ── Presencia: latido periodico para que la mesa vea la zona conectada ─────
@@ -711,7 +744,8 @@ function setupListeners() {
     if (cache && cache.pilots && cache.pilots.length && cache.raceId === raceId) {
       // Arrancar con la copia local: mejor puntuar sin red que no poder empezar
       trace('Sin respuesta del servidor · trabajando con la copia local');
-      raceInfo = { name: cache.raceName, numZones: cache.numZones, numLaps: 3 };
+      raceInfo = { name: cache.raceName, numZones: cache.numZones, numLaps: 3,
+                   zoneTimeLimitSec: cache.zoneTimeLimitSec || 120 };
       pilots   = cache.pilots;
       pilotStatus = cache.pilotStatus || {};
       pilotScores = {};
@@ -801,6 +835,7 @@ function setupListeners() {
     // Guardar copia local para poder trabajar si luego se pierde la cobertura
     saveRaceCache({
       raceId, raceName: raceInfo.name || '', numZones: raceInfo.numZones || 7,
+      zoneTimeLimitSec: raceInfo.zoneTimeLimitSec || 120,
       password: racePassword, pilots, scores: d.scores || {},
       pilotStatus: pilotStatus
     });
@@ -897,6 +932,263 @@ window.selectPilot = function(dorsal) {
   openPilotModal(p);
 };
 
+// ══════════════════════════════════════════════════════════════════════════
+// Cuenta atrás de zona
+// ══════════════════════════════════════════════════════════════════════════
+// El juez arranca la cuenta cuando el piloto entra en la zona. Si llega a
+// cero, pita y propone el 5 de fiasco, que el juez confirma. Un solo piloto
+// cronometrándose a la vez.
+//
+// Lo delicado no es la cuenta, es que el aviso llegue:
+//   · El tiempo restante se calcula SIEMPRE con Date.now(), nunca sumando
+//     ticks: si el navegador frena los temporizadores (pasa en cuanto la
+//     pantalla se apaga o la app pasa a segundo plano) la cuenta no se
+//     retrasa, sólo se repinta más tarde.
+//   · El pitido se programa en el reloj de AudioContext, que sigue corriendo
+//     aunque los setTimeout se frenen. El setTimeout queda de respaldo para
+//     la parte visual y la vibración.
+//   · Un oscilador inaudible mantiene la página "sonando" mientras corre la
+//     cuenta: Chrome no congela una pestaña que está reproduciendo audio.
+//   · Se pide wake lock de pantalla donde exista.
+// Aun así: con el móvil en silencio no hay pitido, y esto no se ha probado en
+// los teléfonos de los jueces. Ver claude/cronometro-de-zona.md.
+const CRO_KEY = 'tr_judge_crono';
+let _cro        = null;   // { dorsal, lap, t0, limite, cumplido, audioArmado }
+let _croFicha   = null;   // ficha abierta ahora mismo { dorsal, lap }
+let _croInt     = null;
+let _croTo      = null;
+let _croCtx     = null;
+let _croKeep    = null;
+let _croNodos   = [];
+let _croLock    = null;
+
+function limiteZonaSec() {
+  let v = parseInt(raceInfo && raceInfo.zoneTimeLimitSec, 10);
+  if (!isNaN(v) && v >= 30 && v <= 600) return v;
+  try {
+    const c = loadRaceCache();
+    const w = c ? parseInt(c.zoneTimeLimitSec, 10) : NaN;
+    if (!isNaN(w) && w >= 30 && w <= 600) return w;
+  } catch (e) {}
+  return 120;   // lo habitual en trial
+}
+function mmss(s) {
+  s = Math.max(0, Math.round(s));
+  const r = s % 60;
+  return Math.floor(s / 60) + ':' + (r < 10 ? '0' : '') + r;
+}
+function croRestante() {
+  return _cro ? (_cro.limite - (Date.now() - _cro.t0) / 1000) : 0;
+}
+
+// ── Sonido ────────────────────────────────────────────────────────────────
+function croAudio() {
+  if (_croCtx) return _croCtx;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  try { _croCtx = new AC(); } catch (e) { return null; }
+  return _croCtx;
+}
+function croKeepAlive(on) {
+  const ctx = croAudio(); if (!ctx) return;
+  if (on && !_croKeep) {
+    try {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.value = 40; g.gain.value = 0.0001;   // inaudible, pero cuenta como audio
+      o.connect(g); g.connect(ctx.destination); o.start();
+      _croKeep = { o: o, g: g };
+    } catch (e) {}
+  } else if (!on && _croKeep) {
+    try { _croKeep.o.stop(); _croKeep.o.disconnect(); _croKeep.g.disconnect(); } catch (e) {}
+    _croKeep = null;
+  }
+}
+function croCancelaPitido() {
+  _croNodos.forEach(function (o) { try { o.stop(); o.disconnect(); } catch (e) {} });
+  _croNodos = [];
+}
+function croProgramaPitido(enSegundos) {
+  const ctx = croAudio(); if (!ctx) return;
+  croCancelaPitido();
+  const base = ctx.currentTime + Math.max(0, enSegundos);
+  for (let i = 0; i < 4; i++) {
+    try {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'square';
+      o.frequency.value = (i === 3) ? 1320 : 880;
+      const ini = base + i * 0.42;
+      const fin = ini + ((i === 3) ? 0.9 : 0.25);
+      g.gain.setValueAtTime(0.0001, ini);
+      g.gain.exponentialRampToValueAtTime(0.9, ini + 0.02);
+      g.gain.setValueAtTime(0.9, fin - 0.06);
+      g.gain.exponentialRampToValueAtTime(0.0001, fin);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(ini); o.stop(fin + 0.05);
+      _croNodos.push(o);
+    } catch (e) {}
+  }
+}
+// Tras recargar la app no se puede programar audio sin un gesto: se arma en
+// cuanto el juez toque cualquier sitio.
+function croRearmaAudio() {
+  if (!_cro || _cro.cumplido || _cro.audioArmado) return;
+  const r = croRestante(); if (r <= 0) return;
+  const ctx = croAudio(); if (!ctx) return;
+  if (ctx.state === 'suspended') { try { ctx.resume(); } catch (e) {} }
+  croKeepAlive(true);
+  croProgramaPitido(r);
+  _cro.audioArmado = true;
+}
+
+// ── Pantalla encendida ────────────────────────────────────────────────────
+function croWakeLock(on) {
+  if (!navigator.wakeLock || !navigator.wakeLock.request) return;
+  if (on) {
+    navigator.wakeLock.request('screen')
+      .then(function (l) { _croLock = l; })
+      .catch(function () {});
+  } else if (_croLock) {
+    try { _croLock.release(); } catch (e) {}
+    _croLock = null;
+  }
+}
+
+// ── Ciclo de vida ─────────────────────────────────────────────────────────
+function croArranca(dorsal, lap) {
+  croPara(true);
+  _cro = { dorsal: dorsal, lap: lap, t0: Date.now(), limite: limiteZonaSec(),
+           cumplido: false, audioArmado: false };
+  try { localStorage.setItem(CRO_KEY, JSON.stringify(_cro)); } catch (e) {}
+  const ctx = croAudio();
+  if (ctx && ctx.state === 'suspended') { try { ctx.resume(); } catch (e) {} }
+  croKeepAlive(true);
+  croProgramaPitido(_cro.limite);
+  _cro.audioArmado = true;
+  croWakeLock(true);
+  _croTo  = setTimeout(croCumplido, _cro.limite * 1000 + 60);
+  _croInt = setInterval(croLatido, 250);
+  croRepinta();
+}
+function croLatido() {
+  if (!_cro) return;
+  if (!_cro.cumplido && croRestante() <= 0) { croCumplido(); return; }
+  croPinta();
+}
+function croCumplido() {
+  if (!_cro || _cro.cumplido) return;
+  _cro.cumplido = true;
+  try { localStorage.setItem(CRO_KEY, JSON.stringify(_cro)); } catch (e) {}
+  if (navigator.vibrate) { try { navigator.vibrate([400,150,400,150,900]); } catch (e) {} }
+  croRepinta();
+}
+function croPara(silencioso) {
+  if (_croInt) { clearInterval(_croInt); _croInt = null; }
+  if (_croTo)  { clearTimeout(_croTo);   _croTo  = null; }
+  croCancelaPitido();
+  croKeepAlive(false);
+  croWakeLock(false);
+  _cro = null;
+  try { localStorage.removeItem(CRO_KEY); } catch (e) {}
+  if (!silencioso) croRepinta();
+}
+// Al recargar la app (o si el navegador la descarta) la cuenta se reanuda con
+// el tiempo real transcurrido, no desde cero.
+function croRecupera() {
+  let s = null;
+  try { s = JSON.parse(localStorage.getItem(CRO_KEY) || 'null'); } catch (e) {}
+  if (!s || !s.dorsal || !s.t0 || !s.limite) return;
+  const transcurrido = (Date.now() - s.t0) / 1000;
+  if (transcurrido > s.limite + 900) {          // más de 15 min pasada: no vale
+    try { localStorage.removeItem(CRO_KEY); } catch (e) {}
+    return;
+  }
+  _cro = s; _cro.audioArmado = false;
+  if (transcurrido >= s.limite) _cro.cumplido = true;
+  else _croTo = setTimeout(croCumplido, (s.limite - transcurrido) * 1000 + 60);
+  _croInt = setInterval(croLatido, 250);
+  croRepinta();
+}
+
+// ── Pintado ───────────────────────────────────────────────────────────────
+function croHTML() {
+  if (!_croFicha) return '';
+  const d = _croFicha.dorsal, lap = _croFicha.lap;
+  if (_cro && _cro.dorsal === d) {
+    if (_cro.cumplido) {
+      return '<div class="cro-box cumplido" id="croCaja">' +
+        '<div class="cro-time" id="croTime">0:00</div>' +
+        '<div class="cro-msg">TIEMPO CUMPLIDO · ' + mmss(_cro.limite) +
+        '<br>Fiasco: le corresponde un 5</div>' +
+        '<button class="cro-btn confirma" onclick="window.submitScore(' + d + ',' +
+          _cro.lap + ',5,\'tiempo\')">✓ CONFIRMAR 5</button>' +
+        '<button class="cro-btn secundario" onclick="croPara()">Anular y puntuar a mano</button>' +
+        '</div>';
+    }
+    return '<div class="cro-box corriendo" id="croCaja">' +
+      '<div class="cro-time" id="croTime">' + mmss(croRestante()) + '</div>' +
+      '<div class="cro-sub">#' + d + ' dentro de la zona · vuelta ' + _cro.lap +
+      '<br>Toca su puntuación cuando salga</div>' +
+      '<button class="cro-btn secundario" onclick="croPara()">✕ Anular cronómetro</button>' +
+      '</div>';
+  }
+  const aviso = (_cro && _cro.dorsal !== d)
+    ? '<div class="cro-otro">⏱ Cuenta atrás en marcha con el <b>#' + _cro.dorsal +
+      '</b> (<span id="croOtroT">' + mmss(croRestante()) + '</span>). Si arrancas ésta, aquélla se anula.</div>'
+    : '';
+  return aviso + '<button class="cro-btn arranca" onclick="croArranca(' + d + ',' + lap +
+         ')">▶ ENTRA EN ZONA · ' + mmss(limiteZonaSec()) + '</button>';
+}
+// Reconstruye el bloque entero: sólo en los cambios de estado.
+function croRepinta() {
+  const b = document.getElementById('croBloque');
+  if (b) b.innerHTML = croHTML();
+  croPinta();
+}
+// Cuatro veces por segundo: sólo texto, sin rehacer el DOM.
+function croPinta() {
+  if (_cro) {
+    const t = document.getElementById('croTime');
+    if (t) t.textContent = _cro.cumplido ? '0:00' : mmss(croRestante());
+    const caja = document.getElementById('croCaja');
+    if (caja && !_cro.cumplido)
+      caja.className = 'cro-box ' + (croRestante() <= 20 ? 'ultimos' : 'corriendo');
+    const otro = document.getElementById('croOtroT');
+    if (otro) otro.textContent = mmss(croRestante());
+  }
+  const chip = document.getElementById('croChip');
+  if (!chip) return;
+  const m = document.getElementById('scoreModal');
+  const aLaVista = _cro && _croFicha && m && m.style.display === 'block' &&
+                   _croFicha.dorsal === _cro.dorsal;
+  if (_cro && !aLaVista) {
+    chip.style.display = 'block';
+    chip.className = _cro.cumplido ? 'cumplido' : '';
+    chip.textContent = _cro.cumplido
+      ? '⏱ #' + _cro.dorsal + ' · TIEMPO CUMPLIDO — tocar para poner el 5'
+      : '⏱ #' + _cro.dorsal + ' · ' + mmss(croRestante()) + ' — tocar para volver';
+  } else {
+    chip.style.display = 'none';
+  }
+}
+function croAbreFicha() {
+  if (!_cro) return;
+  const p = pilots.find(function (x) { return x.dorsal === _cro.dorsal; });
+  if (p) openPilotModal(p);
+}
+
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState !== 'visible' || !_cro) return;
+  croWakeLock(true);
+  croRearmaAudio();
+  if (!_cro.cumplido && croRestante() <= 0) croCumplido(); else croPinta();
+});
+document.addEventListener('click', croRearmaAudio, true);
+document.addEventListener('touchstart', croRearmaAudio, true);
+
+window.croArranca   = croArranca;
+window.croPara      = croPara;
+window.croAbreFicha = croAbreFicha;
+
 function openPilotModal(p) {
   const m = document.getElementById('scoreModal');
   m.style.display = 'block';
@@ -956,6 +1248,7 @@ function openPilotModal(p) {
 
         ${canQuickScore ? `
         <div class="modal-section active" data-section="score">
+          <div id="croBloque"></div>
           <div class="modal-subtitle">Zona ${zone} — <b>VUELTA ${initialLap}</b> · Toca la puntuación</div>
           <div class="score-grid">
             <button class="score-btn score-0" onclick="window.submitScore(${p.dorsal}, ${initialLap}, 0)">0</button>
@@ -1010,6 +1303,11 @@ function openPilotModal(p) {
 
   // Guardar estado de edición (vuelta seleccionada en pestaña Corregir: última puntuada)
   window._editLap = editDefaultLap;
+
+  // Cuenta atrás: sólo tiene sentido si queda alguna vuelta por puntuar, que
+  // es cuando existe la pestaña Puntuar.
+  _croFicha = canQuickScore ? { dorsal: p.dorsal, lap: initialLap } : null;
+  croRepinta();
 }
 
 window.selectModalTab = function(tabId) {
@@ -1117,11 +1415,16 @@ window.deleteScore = async function(dorsal, lap) {
   }
 };
 
-window.submitScore = async function(dorsal, lap, score) {
+window.submitScore = async function(dorsal, lap, score, motivo) {
   const p = pilots.find(x => x.dorsal === dorsal);
   const key = `dorsal_${dorsal}_zone_${zone}_lap_${lap}`;
   const payload = { dorsal, zone, lap, score, ts: Date.now(), source: 'judge', deviceId };
   if (token) payload.token = token;   // la regla lo comprueba en el servidor
+  // 'tiempo' = el 5 sale de la cuenta atrás, no del criterio del juez. Viaja
+  // con la puntuación para que el registro de la mesa lo distinga.
+  if (motivo === 'tiempo') payload.motivo = 'tiempo';
+  // Puntuado el piloto que se estaba cronometrando, la cuenta sobra.
+  if (_cro && _cro.dorsal === dorsal) croPara(true);
 
   // Añadir al historial local inmediatamente (optimistic UI)
   try { history.back(); } catch(e) { document.getElementById('scoreModal').style.display='none'; }
@@ -1297,8 +1600,11 @@ window.addEventListener('popstate', (e) => {
   if (m && m.style.display === 'block') {
     m.style.display = 'none';
     m.innerHTML = '';
+    _croFicha = null;
+    croPinta();          // si la cuenta sigue viva, sale el aviso flotante
   }
 });
+
 </script>
 
 </body>
