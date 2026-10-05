@@ -335,7 +335,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.09.06.1
+      versión 2026.10.04.2
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -388,6 +388,7 @@ if (window.__trArranque) window.__trArranque.firebase = true;
 let raceInfo           = {};   // info publicada por la mesa (nombre, zonas…)
 let pilots             = [];   // lista de pilotos
 let pilotScores        = {};   // { dorsal: { V1, V2, V3 } } solo de esta zona
+let pilotScoreTs       = {};   // { dorsal: { V1: ts, ... } } cuando se puntuo cada una
 let pilotYellowCards   = {};   // { dorsal: tarjeta }
 let pilotObservations  = {};   // { dorsal: observacion }
 let pilotStatus        = {};   // { dorsal: 'dnf' | 'dsq' | 'dns' } — lo manda la mesa
@@ -748,7 +749,7 @@ function setupListeners() {
                    zoneTimeLimitSec: cache.zoneTimeLimitSec || 120 };
       pilots   = cache.pilots;
       pilotStatus = cache.pilotStatus || {};
-      pilotScores = {};
+      pilotScores = {}; pilotScoreTs = {};
       Object.entries(cache.scores || {}).forEach(([key, sc]) => {
         const m = key.match(/^dorsal_(\d+)_zone_(\d+)_lap_(\d+)$/);
         if (!m) return;
@@ -756,7 +757,9 @@ function setupListeners() {
         if (!sc || sc.deleted === true) return;   // marca de borrado
         const dorsal = parseInt(m[1]);
         if (!pilotScores[dorsal]) pilotScores[dorsal] = {};
+        if (!pilotScoreTs[dorsal]) pilotScoreTs[dorsal] = {};
         pilotScores[dorsal]['V' + m[3]] = sc.score;
+        pilotScoreTs[dorsal]['V' + m[3]] = sc.ts || 0;
       });
       document.getElementById('hdrRace').textContent = (cache.raceName || '—');
       markUsingCache(cache);
@@ -783,7 +786,7 @@ function setupListeners() {
     }
     raceInfo = d.info || {};
     pilots = d.pilots ? Object.values(d.pilots) : [];
-    pilotScores = {};
+    pilotScores = {}; pilotScoreTs = {};
     // Retirados / descalificados / no salidos, publicados por la mesa en
     // races/{raceId}/pilot_status como { d12: 'dnf' }. Si no hay nadie, el
     // nodo no existe y aquí queda un objeto vacío.
@@ -808,7 +811,9 @@ function setupListeners() {
         if (z !== zone) return; // solo scores de esta zona
         if (!sc || sc.deleted === true) return;   // marca de borrado
         if (!pilotScores[dorsal]) pilotScores[dorsal] = {};
+        if (!pilotScoreTs[dorsal]) pilotScoreTs[dorsal] = {};
         pilotScores[dorsal]['V' + l] = sc.score;
+        pilotScoreTs[dorsal]['V' + l] = sc.ts || 0;
       });
     }
 
@@ -1189,6 +1194,77 @@ window.croArranca   = croArranca;
 window.croPara      = croPara;
 window.croAbreFicha = croAbreFicha;
 
+// ══════════════════════════════════════════════════════════════════════════
+// Dos puntuaciones seguidas al mismo piloto
+// ══════════════════════════════════════════════════════════════════════════
+// Visto en carrera: un juez toca dos veces sin querer. Como la pestana Puntuar
+// apunta siempre a la primera vuelta SIN puntuar, el segundo toque no repite
+// la vuelta — se va a la SIGUIENTE. El piloto acaba con puntos en dos vueltas
+// consecutivas y nadie se entera hasta cuadrar el acta.
+//
+// No se bloquea: un juez que no puede puntuar es un problema peor, y en una
+// zona sin cobertura no hay a quien preguntar. Se PREGUNTA, que ademas lleva
+// al sitio correcto — porque lo que casi siempre quiere es corregir la vuelta
+// que acaba de meter, no puntuar la siguiente.
+//
+// Entre dos vueltas de la misma zona pasa una vuelta entera al circuito, del
+// orden de una hora. Diez minutos es un margen generoso y corto a la vez.
+const AVISO_DOBLE_MIN = 10;
+
+// Ultima vuelta puntuada a este piloto EN ESTA ZONA, si fue hace poco.
+// Devuelve { lap, score, min } o null.
+function puntuadaReciente(dorsal) {
+  const sc = pilotScores[dorsal] || {};
+  const ts = pilotScoreTs[dorsal] || {};
+  let mejor = null;
+  Object.keys(sc).forEach(function (k) {
+    if (sc[k] === undefined || sc[k] === null) return;
+    const lap = parseInt(String(k).replace('V', ''), 10);
+    if (!lap) return;
+    let cuando = ts[k] || 0;
+    // Respaldo: lo que este dispositivo acaba de enviar. Cubre el hueco de una
+    // puntuacion que todavia no ha vuelto del servidor.
+    const h = recentHistory.find(function (x) {
+      return x.dorsal === dorsal && x.lap === lap && !x.deleted;
+    });
+    if (h && h.ts > cuando) cuando = h.ts;
+    if (!cuando) return;
+    if (!mejor || cuando > mejor.cuando) mejor = { lap: lap, score: sc[k], cuando: cuando };
+  });
+  if (!mejor) return null;
+  const min = Math.floor((Date.now() - mejor.cuando) / 60000);
+  if (min >= AVISO_DOBLE_MIN) return null;
+  return { lap: mejor.lap, score: mejor.score, min: min };
+}
+
+function avisoDobleHTML(dorsal, prev, vueltaNueva) {
+  if (!prev) return '';
+  const hace = prev.min < 1 ? 'hace menos de un minuto' : 'hace ' + prev.min + ' min';
+  return '<div id="avisoDoble" style="border:2px solid #f59e0b;background:rgba(245,158,11,.12);'
+    + 'border-radius:12px;padding:12px 14px;margin-bottom:14px;text-align:left">'
+    + '<div style="font-size:13px;font-weight:800;color:#fbbf24;margin-bottom:6px">'
+    +   '\u26a0 A este piloto ya le puntuaste la VUELTA ' + prev.lap + ' ' + hace + '</div>'
+    + '<div style="font-size:12.5px;line-height:1.5;color:var(--text)">Le pusiste <b>'
+    +   prev.score + ' puntos</b>. Si ha sido un toque de m\u00e1s, corrige esa vuelta. '
+    +   'Si de verdad acaba de pasar otra vez, confirma la vuelta ' + vueltaNueva + '.</div>'
+    + '<div style="display:flex;gap:8px;margin-top:11px;flex-wrap:wrap">'
+    +   '<button class="submit-btn" style="flex:1;min-width:140px;background:#f59e0b;color:#000;'
+    +     'padding:12px" onclick="selectModalTab(\'edit\'); selectEditLap(' + prev.lap + ')">'
+    +     '\u270e CORREGIR LA VUELTA ' + prev.lap + '</button>'
+    +   '<button class="submit-btn" style="flex:1;min-width:140px;background:transparent;'
+    +     'color:var(--muted);border:1px solid var(--border);padding:12px" '
+    +     'onclick="confirmaVueltaNueva()">S\u00cd, ES LA VUELTA ' + vueltaNueva + '</button>'
+    + '</div></div>';
+}
+
+function confirmaVueltaNueva() {
+  const a = document.getElementById('avisoDoble');
+  if (a) a.remove();
+  const g = document.getElementById('gridPuntuar');
+  if (g) g.style.display = '';
+}
+window.confirmaVueltaNueva = confirmaVueltaNueva;
+
 function openPilotModal(p) {
   const m = document.getElementById('scoreModal');
   m.style.display = 'block';
@@ -1206,6 +1282,10 @@ function openPilotModal(p) {
   }
   const initialLap = defaultLap || 1;
   const canQuickScore = defaultLap !== null;
+  // ¿Se le acaba de puntuar otra vuelta en esta misma zona? Se calcula una vez
+  // y se usa dentro de la plantilla.
+  const _prevReciente = canQuickScore ? puntuadaReciente(p.dorsal) : null;
+
   // Vuelta por defecto para Corregir: ÚLTIMA vuelta ya puntuada (la más reciente)
   let editDefaultLap = 1;
   for (let i = numLaps; i >= 1; i--) {
@@ -1249,8 +1329,10 @@ function openPilotModal(p) {
         ${canQuickScore ? `
         <div class="modal-section active" data-section="score">
           <div id="croBloque"></div>
-          <div class="modal-subtitle">Zona ${zone} — <b>VUELTA ${initialLap}</b> · Toca la puntuación</div>
-          <div class="score-grid">
+          ${avisoDobleHTML(p.dorsal, _prevReciente, initialLap)}
+          <div class="modal-subtitle">Zona ${zone} · Toca la puntuación de la
+            <span class="modal-lap" style="font-size:15px;padding:5px 14px">VUELTA ${initialLap}</span></div>
+          <div class="score-grid" id="gridPuntuar"${_prevReciente ? ' style="display:none"' : ''}>
             <button class="score-btn score-0" onclick="window.submitScore(${p.dorsal}, ${initialLap}, 0)">0</button>
             <button class="score-btn score-1" onclick="window.submitScore(${p.dorsal}, ${initialLap}, 1)">1</button>
             <button class="score-btn score-2" onclick="window.submitScore(${p.dorsal}, ${initialLap}, 2)">2</button>
@@ -1441,7 +1523,11 @@ window.submitScore = async function(dorsal, lap, score, motivo) {
     const q = getOfflineQueue();
     // Reemplazar si ya hay un score para la misma clave (más reciente gana)
     const existing = q.findIndex(x => x.key === key);
-    const entry = { key, payload, tries: 0 };
+    // t0 = cuando esta puntuacion dejo de llegar a la mesa. Si se corrige una
+    // que ya estaba en cola, se conserva el t0 original: lo que importa no es
+    // cuando se escribio el ultimo valor, sino cuanto lleva la mesa a ciegas.
+    const t0 = (existing >= 0 && q[existing].t0) ? q[existing].t0 : Date.now();
+    const entry = { key, payload, tries: 0, t0: t0 };
     if (existing >= 0) q[existing] = entry; else q.push(entry);
     setOfflineQueue(q);
     showToast(`📥 Guardado offline (${q.length} pendientes)`, 'err');
@@ -1450,38 +1536,79 @@ window.submitScore = async function(dorsal, lap, score, motivo) {
 };
 
 // Reintento periódico de la cola offline
+//
+// REGLA: de aquí no se cae nada nunca. Antes se descartaba una puntuación tras
+// 20 intentos fallidos, y en silencio. Con la tarjeta de papel detrás eso era
+// un susto; el día que la tarjeta desaparezca es una puntuación perdida que
+// nadie echa de menos. Si no se puede enviar, se sigue intentando y se avisa.
+//
+// Para no machacar al servidor con algo que está siendo rechazado, cada
+// reintento espera más que el anterior: 5 s, 10 s, 20 s… hasta un tope de dos
+// minutos. Esperar no es rendirse.
+const COLA_ESPERA_MAX_MS = 120000;
+
 async function flushOfflineQueue() {
   const q = getOfflineQueue();
   if (!q.length) return;
-  const remaining = [];
+  const ahora = Date.now();
+  const restan = [];
+  let enviadas = 0;
   for (const item of q) {
+    const espera = Math.min(COLA_ESPERA_MAX_MS, 5000 * Math.pow(2, Math.min(item.tries || 0, 5)));
+    if (item.ultimo && (ahora - item.ultimo) < espera) { restan.push(item); continue; }
     try {
       const r = ref(db, `races/${raceId}/scores/${item.key}`);
       await set(r, item.payload);
+      enviadas++;
     } catch(e) {
-      item.tries = (item.tries || 0) + 1;
-      if (item.tries < 20) remaining.push(item);
+      item.tries  = (item.tries || 0) + 1;
+      item.ultimo = ahora;
+      item.error  = String((e && e.message) || e).slice(0, 120);
+      restan.push(item);   // nunca se descarta
     }
   }
-  setOfflineQueue(remaining);
-  const sent = q.length - remaining.length;
-  if (sent > 0) {
-    showToast(`✓ ${sent} puntuación(es) enviadas`);
-    updateQueueBadge();
-  }
+  setOfflineQueue(restan);
+  if (enviadas > 0) showToast(`✓ ${enviadas} puntuación(es) enviadas`);
+  updateQueueBadge();
+  paintConnection();
 }
+
+// Minutos que lleva la puntuación más antigua sin llegar a la mesa.
+function colaEdadMin() {
+  const q = getOfflineQueue();
+  if (!q.length) return 0;
+  let t0 = Date.now();
+  q.forEach(function (x) { if (x.t0 && x.t0 < t0) t0 = x.t0; });
+  return Math.max(0, Math.floor((Date.now() - t0) / 60000));
+}
+
+// A partir de estos minutos el aviso deja de ser informativo y pasa a ocupar
+// el ancho de la pantalla: si una zona lleva un cuarto de hora sin que llegue
+// nada, el juez tiene que enterarse sin ir a buscarlo.
+const COLA_ALARMA_MIN = 5;
 
 function updateQueueBadge() {
   const q = getOfflineQueue();
   let badge = document.getElementById('queueBadge');
-  if (!q.length) { if (badge) badge.remove(); return; }
+  const min = q.length ? colaEdadMin() : 0;
+  // Por debajo del umbral no se pinta nada: la barra de conexion YA dice
+  // cuantas van pendientes y cuanto llevan. Dos avisos simultaneos diciendo lo
+  // mismo solo consiguen taparse el uno al otro — que es lo que pasaba.
+  if (!q.length || min < COLA_ALARMA_MIN) { if (badge) badge.remove(); return; }
   if (!badge) {
     badge = document.createElement('div');
     badge.id = 'queueBadge';
-    badge.style.cssText = 'position:fixed;top:58px;right:12px;background:#dc2626;color:#fff;padding:4px 10px;border-radius:12px;font-size:10px;font-weight:800;letter-spacing:1px;z-index:50';
-    document.body.appendChild(badge);
+    // En el flujo normal, justo debajo de la barra de conexion: asi empuja el
+    // contenido en vez de taparlo.
+    badge.style.cssText = 'padding:10px 14px;font-size:12.5px;font-weight:800;'
+      + 'line-height:1.35;text-align:center;background:#b91c1c;color:#fff;'
+      + 'border-bottom:2px solid #fca5a5;flex-shrink:0';
+    const bar = document.getElementById('connBar');
+    if (bar && bar.parentNode) bar.parentNode.insertBefore(badge, bar.nextSibling);
+    else document.body.appendChild(badge);
   }
-  badge.textContent = `📥 ${q.length} PENDIENTES`;
+  badge.textContent = '\u26a0 ' + q.length + ' SIN ENVIAR \u00b7 ' + min
+                    + ' MIN \u2014 NO CIERRES LA APP';
 }
 
 // ── Estado de conexion real (Firebase .info/connected) ────────────────────
@@ -1512,14 +1639,20 @@ function paintConnection() {
       : 'SIN CONEXIÓN · trabajando con la copia guardada en el móvil';
     return;
   }
+  const _min = pend ? colaEdadMin() : 0;
+  const _desde = _min >= 1 ? ` · ${_min} min sin llegar a la mesa` : '';
   if (!online) {
     bar.classList.add('off');
     bar.textContent = pend
-      ? `SIN CONEXIÓN · ${pend} puntuación(es) guardadas en el móvil`
+      ? `SIN CONEXIÓN · ${pend} puntuación(es) guardadas en el móvil${_desde}`
       : 'SIN CONEXIÓN · se guardará todo y se enviará al recuperar cobertura';
   } else if (pend) {
+    // Hay cobertura y aun asi quedan pendientes: no es "enviando", es que algo
+    // las esta rechazando. Decirlo, en vez de aparentar normalidad.
     bar.classList.add('pend');
-    bar.textContent = `ENVIANDO ${pend} puntuación(es) pendientes…`;
+    bar.textContent = _min >= COLA_ALARMA_MIN
+      ? `⚠ ${pend} puntuación(es) SIN ENVIAR pese a haber conexión${_desde}`
+      : `ENVIANDO ${pend} puntuación(es) pendientes…`;
   }
 }
 
@@ -1529,6 +1662,26 @@ setInterval(paintConnection, 2000);
 window.addEventListener('online', flushOfflineQueue);
 flushOfflineQueue(); // intentar al cargar
 paintConnection();
+updateQueueBadge();
+
+// Al volver a primer plano, reintentar ya: con la app en segundo plano el
+// navegador frena los temporizadores y la cola puede llevar minutos parada.
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState !== 'visible') return;
+  flushOfflineQueue();
+  updateQueueBadge();
+  paintConnection();
+});
+
+// Cerrar la app con puntuaciones sin enviar es perderlas de vista. El aviso es
+// el que da el navegador y no siempre sale (en la APK puede no aparecer), asi
+// que es un recordatorio, no una garantia: la garantia es el aviso en pantalla.
+window.addEventListener('beforeunload', function (e) {
+  if (!getOfflineQueue().length) return;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
 
 // Quitar una puntuacion. Dos formas segun el modo:
 //   legacy -> remove(), como siempre. Las reglas publicadas exigen el campo
