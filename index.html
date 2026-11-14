@@ -335,7 +335,7 @@ body{display:flex;flex-direction:column;height:100vh}
     </div>
     <div class="err" id="loginErr"></div>
     <div style="font-size:10px;color:var(--muted);text-align:center;letter-spacing:1px">
-      versión 2026.10.04.2
+      versión 2026.10.06.1
     </div>
     <button id="loginBtn" onclick="window.doLogin()" disabled>ENTRAR</button>
   </div>
@@ -350,6 +350,22 @@ body{display:flex;flex-direction:column;height:100vh}
   <div class="history-title">Última puntuación registrada</div>
   <div id="historyList"></div>
 </div>
+
+<!-- El service worker, antes que nada.
+     Va en un script clasico y no dentro del modulo de abajo por dos razones,
+     las dos medidas en pruebas_jueces_offline.py:
+       · los modulos se ejecutan DESPUES del evento 'load', asi que engancharlo
+         ahi no llega a dispararse nunca;
+       · un modulo que no consigue uno de sus imports NO EJECUTA NADA. Si el
+         registro viviera dentro, el dia que no haya cobertura el juez se
+         quedaria sin service worker justo cuando mas falta hace.
+     Red primero siempre: con cobertura se sirve la version nueva. Lo guardado
+     solo entra cuando no hay red, que es cuando la alternativa es nada. -->
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').catch(function () {});
+}
+</script>
 
 <!-- Firebase SDK -->
 <script type="module">
@@ -424,18 +440,9 @@ function guardarToken(carrera, t){
   } catch(e){}
 }
 
-// Sin service worker a proposito: la app se instala desde el APK, no desde el
-// navegador, asi que no aporta nada y solo puede servir copias antiguas.
-// Ademas, si un movil arrastra uno de una version anterior, lo eliminamos y
-// borramos sus caches para que siempre se cargue la ultima version publicada.
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.getRegistrations()
-    .then(rs => rs.forEach(r => r.unregister()))
-    .catch(() => {});
-}
-if (window.caches && caches.keys) {
-  caches.keys().then(ks => ks.forEach(k => caches.delete(k))).catch(() => {});
-}
+// El service worker se registra arriba, en un script clasico, ANTES de este
+// modulo. Aqui no puede ir: un modulo que no consigue importar el SDK de
+// Firebase no ejecuta ni una linea, y es justo el caso que hay que cubrir.
 
 const auth = getAuth(app);
 signInAnonymously(auth).catch(e => console.warn('auth:', e.message));
@@ -1413,7 +1420,12 @@ window.submitYellowCard = async function(dorsal) {
     showToast(`🟨 Tarjeta amarilla #${dorsal} registrada`);
     try { history.back(); } catch(e) { document.getElementById('scoreModal').style.display='none'; }
   } catch(e) {
-    showToast('⚠ Error al registrar tarjeta', 'err'); console.error(e);
+    // A la cola, como las puntuaciones. Y se cierra la ficha igual: si no, el
+    // juez vuelve a escribir el motivo creyendo que no se ha guardado.
+    const n = _encola('yellow_cards/' + key, yc, 'tarjeta');
+    showToast(`📥 Tarjeta guardada, se enviará (${n} pendientes)`, 'err');
+    try { history.back(); } catch(e2) { document.getElementById('scoreModal').style.display='none'; }
+    console.warn('Tarjeta encolada:', e);
   }
 };
 window.removeYellowCard = async function(dorsal) {
@@ -1430,7 +1442,12 @@ window.removeYellowCard = async function(dorsal) {
     await set(ref(db, `races/${raceId}/yellow_cards/${key}`), marca);
     showToast('✓ Tarjeta eliminada');
     try { history.back(); } catch(e){}
-  } catch(e) { showToast('⚠ Error', 'err'); }
+  } catch(e) {
+    const n = _encola('yellow_cards/' + key, marca, 'borrado de tarjeta');
+    showToast(`📥 Se eliminará al recuperar cobertura (${n} pendientes)`, 'err');
+    try { history.back(); } catch(e2){}
+    console.warn('Borrado de tarjeta encolado:', e);
+  }
 };
 
 window.submitObservation = async function(dorsal) {
@@ -1444,7 +1461,10 @@ window.submitObservation = async function(dorsal) {
     showToast(`📝 Observación #${dorsal} enviada`);
     try { history.back(); } catch(e) { document.getElementById('scoreModal').style.display='none'; }
   } catch(e) {
-    showToast('⚠ Error al enviar', 'err'); console.error(e);
+    const n = _encola('observations/' + key, obs, 'observación');
+    showToast(`📥 Observación guardada, se enviará (${n} pendientes)`, 'err');
+    try { history.back(); } catch(e2) { document.getElementById('scoreModal').style.display='none'; }
+    console.warn('Observación encolada:', e);
   }
 };
 window.removeObservation = async function(dorsal) {
@@ -1460,16 +1480,76 @@ window.removeObservation = async function(dorsal) {
     await set(ref(db, `races/${raceId}/observations/${key}`), marca);
     showToast('✓ Observación eliminada');
     try { history.back(); } catch(e){}
-  } catch(e) { showToast('⚠ Error', 'err'); }
+  } catch(e) {
+    const n = _encola('observations/' + key, marca, 'borrado de observación');
+    showToast(`📥 Se eliminará al recuperar cobertura (${n} pendientes)`, 'err');
+    try { history.back(); } catch(e2){}
+    console.warn('Borrado de observación encolado:', e);
+  }
 };
 
 // Cola offline: si falla, encolar localmente y reintentar cada 5s
+//
+// Antes aqui solo entraban las puntuaciones. Los borrados, las tarjetas y las
+// observaciones se perdian sin mas si fallaba el envio. El peor de los tres es
+// el borrado: el juez se queda con la puntuacion equivocada PUESTA y ademas
+// creyendo que la ha quitado, y eso acaba en la clasificacion final.
+//
+// Una entrada de la cola:
+//   { key, ruta, op, payload, que, tries, t0, ultimo, error }
+//   ruta   relativa a races/{raceId}  ·  op  'set' | 'remove'
+//   que    como se llama esto al hablarle al juez
 const OFFLINE_QUEUE_KEY = 'judge_offline_queue_' + zone;
 function getOfflineQueue() {
   try { return JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || '[]'); } catch(e) { return []; }
 }
 function setOfflineQueue(q) {
   try { localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(q)); } catch(e){}
+}
+
+// Las entradas encoladas por la version anterior NO llevan 'ruta': eran todas
+// puntuaciones. No se descartan, se interpretan. Un movil que se actualice con
+// la cola llena tiene que seguir enviandola.
+function _rutaDe(item) {
+  return item.ruta || ('scores/' + item.key);
+}
+
+// La clave de deduplicacion es la RUTA, no el 'key'. Una tarjeta amarilla y
+// una observacion del mismo piloto comparten key (dorsal_N_zone_Z): con el
+// key como clave se habrian pisado la una a la otra.
+function _encola(ruta, payload, que, op) {
+  const q = getOfflineQueue();
+  let existing = -1;
+  for (let k = 0; k < q.length; k++) if (_rutaDe(q[k]) === ruta) { existing = k; break; }
+  // t0 = cuando esto dejo de llegar a la mesa. Si se corrige algo que ya
+  // estaba en cola, se conserva el t0 original: lo que importa no es cuando se
+  // escribio el ultimo valor, sino cuanto lleva la mesa a ciegas.
+  const t0 = (existing >= 0 && q[existing].t0) ? q[existing].t0 : Date.now();
+  const entry = { key: ruta, ruta: ruta, op: op || 'set', payload: payload,
+                  que: que || 'puntuaci\u00f3n', tries: 0, t0: t0 };
+  if (existing >= 0) q[existing] = entry; else q.push(entry);
+  setOfflineQueue(q);
+  return q.length;
+}
+
+// Como llamar a lo que hay en la cola cuando se le habla al juez. Si solo hay
+// puntuaciones se dice "puntuaciones"; en cuanto hay algo mas, "cambios".
+function colaQue() {
+  const q = getOfflineQueue();
+  for (let k = 0; k < q.length; k++)
+    if (_rutaDe(q[k]).indexOf('scores/') !== 0) return 'cambio(s)';
+  return 'puntuaci\u00f3n(es)';
+}
+
+// Un borrado que no sale tambien se encola. Segun el modo, se reenvia como
+// marca { deleted: true } (token) o como remove() de verdad (legacy).
+function _encolaBorrado(key, dorsal, lap) {
+  if (authMode !== 'token')
+    return _encola('scores/' + key, null, 'borrado', 'remove');
+  const marca = { dorsal: dorsal, zone: zone, lap: lap, deleted: true,
+                  ts: Date.now(), source: 'judge', deviceId: deviceId };
+  if (token) marca.token = token;
+  return _encola('scores/' + key, marca, 'borrado', 'set');
 }
 
 // Eliminar puntuación (por ejemplo error de piloto)
@@ -1483,18 +1563,28 @@ window.deleteScore = async function(dorsal, lap) {
   }
   if (!confirm(`¿Eliminar la puntuación de V${lap} del dorsal ${dorsal}?`)) return;
   const key = `dorsal_${dorsal}_zone_${zone}_lap_${lap}`;
+  let encolado = false;
   try {
     await _borraPuntuacion(key, dorsal, lap);
-    try { history.back(); } catch(e) { document.getElementById('scoreModal').style.display='none'; }
-    showToast(`🗑 Eliminada V${lap} de #${dorsal}`);
-    // Marcar en historial local como "borrado"
-    recentHistory.unshift({ dorsal, lap, score: '—', ts: Date.now(), key, name: p ? p.name : '', deleted: true });
-    if (recentHistory.length > 6) recentHistory.length = 6;
-    renderHistory();
   } catch(e) {
-    showToast('⚠ Error al eliminar', 'err');
-    console.error(e);
+    _encolaBorrado(key, dorsal, lap);
+    encolado = true;
+    console.warn('Borrado encolado:', e);
   }
+  // Pase lo que pase, en ESTE movil la puntuacion ya no esta: o se ha borrado
+  // o esta en la cola para borrarse. Si se dejara puesta, el aviso de doble
+  // puntuacion saltaria por una puntuacion que el juez acaba de quitar.
+  if (pilotScores[dorsal])   delete pilotScores[dorsal]['V' + lap];
+  if (pilotScoreTs[dorsal])  delete pilotScoreTs[dorsal]['V' + lap];
+  try { history.back(); } catch(e) { document.getElementById('scoreModal').style.display='none'; }
+  showToast(encolado
+    ? `🗑 V${lap} de #${dorsal} — se borrará al recuperar cobertura`
+    : `🗑 Eliminada V${lap} de #${dorsal}`, encolado ? 'err' : null);
+  // Marcar en historial local como "borrado"
+  recentHistory.unshift({ dorsal, lap, score: '—', ts: Date.now(), key, name: p ? p.name : '', deleted: true });
+  if (recentHistory.length > 6) recentHistory.length = 6;
+  renderHistory();
+  if (encolado) { updateQueueBadge(); paintConnection(); }
 };
 
 window.submitScore = async function(dorsal, lap, score, motivo) {
@@ -1519,18 +1609,8 @@ window.submitScore = async function(dorsal, lap, score, motivo) {
     await set(scoreRef, payload);
     showToast(`✓ ${dorsal} — V${lap} — ${score}pts`);
   } catch(e) {
-    // Encolar para reintento
-    const q = getOfflineQueue();
-    // Reemplazar si ya hay un score para la misma clave (más reciente gana)
-    const existing = q.findIndex(x => x.key === key);
-    // t0 = cuando esta puntuacion dejo de llegar a la mesa. Si se corrige una
-    // que ya estaba en cola, se conserva el t0 original: lo que importa no es
-    // cuando se escribio el ultimo valor, sino cuanto lleva la mesa a ciegas.
-    const t0 = (existing >= 0 && q[existing].t0) ? q[existing].t0 : Date.now();
-    const entry = { key, payload, tries: 0, t0: t0 };
-    if (existing >= 0) q[existing] = entry; else q.push(entry);
-    setOfflineQueue(q);
-    showToast(`📥 Guardado offline (${q.length} pendientes)`, 'err');
+    const n = _encola('scores/' + key, payload, 'puntuación');
+    showToast(`📥 Guardado offline (${n} pendientes)`, 'err');
     console.warn('Offline queue:', e);
   }
 };
@@ -1552,14 +1632,16 @@ async function flushOfflineQueue() {
   if (!q.length) return;
   const ahora = Date.now();
   const restan = [];
-  let enviadas = 0;
+  let enviadas = 0, otros = 0;
   for (const item of q) {
     const espera = Math.min(COLA_ESPERA_MAX_MS, 5000 * Math.pow(2, Math.min(item.tries || 0, 5)));
     if (item.ultimo && (ahora - item.ultimo) < espera) { restan.push(item); continue; }
     try {
-      const r = ref(db, `races/${raceId}/scores/${item.key}`);
-      await set(r, item.payload);
+      const r = ref(db, `races/${raceId}/` + _rutaDe(item));
+      if (item.op === 'remove') await remove(r); else await set(r, item.payload);
       enviadas++;
+      if (_rutaDe(item).indexOf('scores/') !== 0 || item.op === 'remove' ||
+          (item.payload && item.payload.deleted)) otros++;
     } catch(e) {
       item.tries  = (item.tries || 0) + 1;
       item.ultimo = ahora;
@@ -1568,7 +1650,9 @@ async function flushOfflineQueue() {
     }
   }
   setOfflineQueue(restan);
-  if (enviadas > 0) showToast(`✓ ${enviadas} puntuación(es) enviadas`);
+  if (enviadas > 0)
+    showToast(otros ? `✓ ${enviadas} cambio(s) enviados`
+                    : `✓ ${enviadas} puntuación(es) enviadas`);
   updateQueueBadge();
   paintConnection();
 }
@@ -1635,7 +1719,7 @@ function paintConnection() {
   if (!online && usingCache) {
     bar.classList.add('off');
     bar.textContent = pend
-      ? `SIN CONEXIÓN · copia local · ${pend} puntuación(es) guardadas`
+      ? `SIN CONEXIÓN · copia local · ${pend} ${colaQue()} guardadas`
       : 'SIN CONEXIÓN · trabajando con la copia guardada en el móvil';
     return;
   }
@@ -1644,15 +1728,15 @@ function paintConnection() {
   if (!online) {
     bar.classList.add('off');
     bar.textContent = pend
-      ? `SIN CONEXIÓN · ${pend} puntuación(es) guardadas en el móvil${_desde}`
+      ? `SIN CONEXIÓN · ${pend} ${colaQue()} guardadas en el móvil${_desde}`
       : 'SIN CONEXIÓN · se guardará todo y se enviará al recuperar cobertura';
   } else if (pend) {
     // Hay cobertura y aun asi quedan pendientes: no es "enviando", es que algo
     // las esta rechazando. Decirlo, en vez de aparentar normalidad.
     bar.classList.add('pend');
     bar.textContent = _min >= COLA_ALARMA_MIN
-      ? `⚠ ${pend} puntuación(es) SIN ENVIAR pese a haber conexión${_desde}`
-      : `ENVIANDO ${pend} puntuación(es) pendientes…`;
+      ? `⚠ ${pend} ${colaQue()} SIN ENVIAR pese a haber conexión${_desde}`
+      : `ENVIANDO ${pend} ${colaQue()} pendientes…`;
   }
 }
 
